@@ -109,6 +109,7 @@ impl SimMessageBus {
                 replica.borrow_mut().on_prepare(input);
             }
             PendingMessage::PrepareResponse(to_replica_id, input) => {
+                self.oracle.on_prepare_response_sent(to_replica_id, &input);
                 let replica = self.find_replica(to_replica_id);
                 replica.borrow_mut().on_prepare_response(input);
             }

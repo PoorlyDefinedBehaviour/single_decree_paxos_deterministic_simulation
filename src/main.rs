@@ -18,6 +18,7 @@ mod types;
 #[derive(Debug)]
 struct Replica {
     min_proposal_number: ProposalNumber,
+    next_proposal_number: ProposalNumber,
     accepted_proposal_number: Option<ProposalNumber>,
     accepted_value: Option<String>,
 
@@ -42,8 +43,11 @@ struct Config {
 
 impl Replica {
     fn new(config: Config, bus: Rc<dyn contracts::MessageBus>) -> Self {
+        // In practice, the value would be read from storage.
+        let min_proposal_number = 0;
         Self {
-            min_proposal_number: 0,
+            min_proposal_number,
+            next_proposal_number: min_proposal_number + 1,
             accepted_proposal_number: None,
             accepted_value: None,
             config,
@@ -57,8 +61,9 @@ impl Replica {
     }
 
     fn next_proposal_number(&mut self) -> u64 {
-        self.min_proposal_number += 1;
-        self.min_proposal_number
+        let proposal_number = self.next_proposal_number;
+        self.next_proposal_number += 1;
+        proposal_number
     }
 
     fn on_start_proposal(&mut self, value: String) {
@@ -146,11 +151,7 @@ impl Replica {
         for i in 0..self.config.replicas.len() {
             let replica_id = self.config.replicas[i];
 
-            if replica_id == self.config.id {
-                self.on_prepare(input.clone());
-            } else {
-                self.bus.send_prepare(replica_id, input.clone());
-            }
+            self.bus.send_prepare(replica_id, input.clone());
         }
     }
 
@@ -176,11 +177,7 @@ impl Replica {
         for i in 0..self.config.replicas.len() {
             let replica_id = self.config.replicas[i];
 
-            if replica_id == self.config.id {
-                self.on_accept(input.clone());
-            } else {
-                self.bus.send_accept(replica_id, input.clone());
-            }
+            self.bus.send_accept(replica_id, input.clone());
         }
     }
 }
