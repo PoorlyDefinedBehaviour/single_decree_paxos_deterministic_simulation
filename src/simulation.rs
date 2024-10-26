@@ -43,7 +43,8 @@ impl Simulator {
         if self.num_client_requests_sent < self.config.num_client_requests {
             let i = self.rng.gen_range(0..self.replicas.len());
             let mut replica = self.replicas[i].as_ref().borrow_mut();
-            replica.on_start_proposal(format!("value-{i}"));
+            let replica_id = replica.config.id;
+            replica.on_start_proposal(format!("value-{}", replica_id));
             self.num_client_requests_sent += 1;
         }
 
@@ -55,7 +56,7 @@ impl Simulator {
 pub(crate) struct SimMessageBus {
     replicas: RefCell<Vec<Rc<RefCell<Replica>>>>,
     queue: RefCell<Vec<PendingMessage>>,
-    oracle: Oracle,
+    oracle: RefCell<Oracle>,
 }
 
 #[derive(Debug)]
@@ -71,7 +72,7 @@ impl SimMessageBus {
         Self {
             replicas: RefCell::new(Vec::new()),
             queue: RefCell::new(Vec::new()),
-            oracle,
+            oracle: RefCell::new(oracle),
         }
     }
 }
@@ -109,16 +110,23 @@ impl SimMessageBus {
                 replica.borrow_mut().on_prepare(input);
             }
             PendingMessage::PrepareResponse(to_replica_id, input) => {
-                self.oracle.on_prepare_response_sent(to_replica_id, &input);
+                self.oracle
+                    .borrow()
+                    .on_prepare_response_sent(to_replica_id, &input);
                 let replica = self.find_replica(to_replica_id);
                 replica.borrow_mut().on_prepare_response(input);
             }
             PendingMessage::Accept(to_replica_id, input) => {
+                self.oracle
+                    .borrow_mut()
+                    .on_accept_sent(to_replica_id, &input);
                 let replica = self.find_replica(to_replica_id);
                 replica.borrow_mut().on_accept(input);
             }
             PendingMessage::AcceptResponse(to_replica_id, input) => {
-                self.oracle.on_proposal_accepted(to_replica_id, &input);
+                self.oracle
+                    .borrow_mut()
+                    .on_proposal_accepted(to_replica_id, &input);
                 let replica = self.find_replica(to_replica_id);
                 replica.borrow_mut().on_accept_response(input);
             }
@@ -167,9 +175,9 @@ mod tests {
 
         let rng = rand::rngs::StdRng::seed_from_u64(seed);
 
-        let bus: Rc<SimMessageBus> = Rc::new(SimMessageBus::new(Oracle::new()));
-
         let servers = vec![1, 2, 3];
+
+        let bus: Rc<SimMessageBus> = Rc::new(SimMessageBus::new(Oracle::new(servers.len())));
 
         let replicas: Vec<_> = servers
             .iter()

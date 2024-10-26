@@ -30,7 +30,7 @@ pub(crate) struct AcceptInput {
     pub value: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub(crate) struct AcceptOutput {
     pub from_replica_id: ReplicaId,
     pub request_id: RequestId,
