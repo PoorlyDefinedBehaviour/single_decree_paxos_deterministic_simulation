@@ -1,20 +1,19 @@
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
-    hash::Hash,
     rc::Rc,
 };
 
+use oracle::Oracle;
 use rand::{rngs::StdRng, Rng, SeedableRng};
+use types::{
+    AcceptInput, AcceptOutput, PrepareInput, PrepareOutput, ProposalNumber, ReplicaId, RequestId,
+};
 
-type ReplicaId = u32;
-type ProposalNumber = u64;
-
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-enum RequestId {
-    Prepare(ReplicaId, ProposalNumber),
-    Accept(ReplicaId, ProposalNumber),
-}
+mod contracts;
+mod oracle;
+mod simulation;
+mod types;
 
 #[derive(Debug)]
 struct Replica {
@@ -23,7 +22,7 @@ struct Replica {
     accepted_value: Option<String>,
 
     config: Config,
-    bus: Rc<dyn MessageBus>,
+    bus: Rc<dyn contracts::MessageBus>,
 
     inflight_requests: HashMap<RequestId, InflightRequest>,
 }
@@ -41,46 +40,8 @@ struct Config {
     replicas: Vec<ReplicaId>,
 }
 
-#[derive(Debug, Clone)]
-struct PrepareInput {
-    from_replica_id: ReplicaId,
-    request_id: RequestId,
-    proposal_number: ProposalNumber,
-}
-
-#[derive(Debug, Hash, PartialEq, Eq)]
-struct PrepareOutput {
-    from_replica_id: ReplicaId,
-    request_id: RequestId,
-    accepted_proposal_number: Option<ProposalNumber>,
-    accepted_value: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct AcceptInput {
-    from_replica_id: ReplicaId,
-    request_id: RequestId,
-    proposal_number: ProposalNumber,
-    value: String,
-}
-
-#[derive(Debug)]
-struct AcceptOutput {
-    from_replica_id: ReplicaId,
-    request_id: RequestId,
-    min_proposal_number: ProposalNumber,
-}
-
-trait MessageBus: std::fmt::Debug {
-    fn send_prepare(&self, to_replica_id: ReplicaId, input: PrepareInput);
-    fn send_prepare_response(&self, to_replica_id: ReplicaId, input: PrepareOutput);
-
-    fn send_accept(&self, to_replica_id: ReplicaId, input: AcceptInput);
-    fn send_accept_response(&self, to_replica_id: ReplicaId, input: AcceptOutput);
-}
-
 impl Replica {
-    fn new(config: Config, bus: Rc<dyn MessageBus>) -> Self {
+    fn new(config: Config, bus: Rc<dyn contracts::MessageBus>) -> Self {
         Self {
             min_proposal_number: 0,
             accepted_proposal_number: None,
@@ -224,184 +185,7 @@ impl Replica {
     }
 }
 
-#[derive(Debug)]
-struct Simulator {
-    config: SimulatorConfig,
-    rng: StdRng,
-    replicas: Vec<Rc<RefCell<Replica>>>,
-    bus: Rc<SimMessageBus>,
-    num_client_requests_sent: u32,
-}
-
-#[derive(Debug)]
-struct SimulatorConfig {
-    num_client_requests: u32,
-}
-
-impl Simulator {
-    fn new(
-        config: SimulatorConfig,
-        rng: StdRng,
-        replicas: Vec<Rc<RefCell<Replica>>>,
-        bus: Rc<SimMessageBus>,
-    ) -> Self {
-        Self {
-            config,
-            rng,
-            replicas,
-            bus,
-            num_client_requests_sent: 0,
-        }
-    }
-
-    fn tick(&mut self) {
-        if self.num_client_requests_sent < self.config.num_client_requests {
-            let i = self.rng.gen_range(0..self.replicas.len());
-            let mut replica = self.replicas[i].as_ref().borrow_mut();
-            replica.on_start_proposal(format!("value-{i}"));
-            self.num_client_requests_sent += 1;
-        }
-
-        self.bus.tick();
-    }
-}
-
-#[derive(Debug)]
-struct SimMessageBus {
-    replicas: RefCell<Vec<Rc<RefCell<Replica>>>>,
-    queue: RefCell<Vec<PendingMessage>>,
-}
-
-#[derive(Debug)]
-enum PendingMessage {
-    Prepare(ReplicaId, PrepareInput),
-    PrepareResponse(ReplicaId, PrepareOutput),
-    Accept(ReplicaId, AcceptInput),
-    AcceptResponse(ReplicaId, AcceptOutput),
-}
-
-impl SimMessageBus {
-    fn new() -> Self {
-        Self {
-            replicas: RefCell::new(Vec::new()),
-            queue: RefCell::new(Vec::new()),
-        }
-    }
-}
-
-impl SimMessageBus {
-    fn set_replicas(&self, new_replicas: Vec<Rc<RefCell<Replica>>>) {
-        let mut replicas = self.replicas.borrow_mut();
-        replicas.clear();
-        replicas.extend(new_replicas);
-    }
-
-    fn find_replica(&self, replica_id: ReplicaId) -> Rc<RefCell<Replica>> {
-        let replicas = self.replicas.borrow();
-
-        let replica = replicas
-            .iter()
-            .find(|r| r.borrow().config.id == replica_id)
-            .expect("unknown replica id");
-
-        Rc::clone(replica)
-    }
-
-    fn tick(&self) {
-        let message = {
-            let mut queue = self.queue.borrow_mut();
-            if queue.is_empty() {
-                return;
-            }
-            queue.remove(0)
-        };
-
-        dbg!(&message);
-        match message {
-            PendingMessage::Prepare(to_replica_id, input) => {
-                let replica = self.find_replica(to_replica_id);
-                replica.borrow_mut().on_prepare(input);
-            }
-            PendingMessage::PrepareResponse(to_replica_id, input) => {
-                let replica = self.find_replica(to_replica_id);
-                replica.borrow_mut().on_prepare_response(input);
-            }
-            PendingMessage::Accept(to_replica_id, input) => {
-                let replica = self.find_replica(to_replica_id);
-                replica.borrow_mut().on_accept(input);
-            }
-            PendingMessage::AcceptResponse(to_replica_id, input) => {
-                let replica = self.find_replica(to_replica_id);
-                replica.borrow_mut().on_accept_response(input);
-            }
-        }
-    }
-}
-
-impl MessageBus for SimMessageBus {
-    fn send_prepare(&self, to_replica_id: ReplicaId, input: PrepareInput) {
-        self.queue
-            .borrow_mut()
-            .push(PendingMessage::Prepare(to_replica_id, input));
-    }
-
-    fn send_prepare_response(&self, to_replica_id: ReplicaId, input: PrepareOutput) {
-        self.queue
-            .borrow_mut()
-            .push(PendingMessage::PrepareResponse(to_replica_id, input));
-    }
-
-    fn send_accept(&self, to_replica_id: ReplicaId, input: AcceptInput) {
-        self.queue
-            .borrow_mut()
-            .push(PendingMessage::Accept(to_replica_id, input));
-    }
-
-    fn send_accept_response(&self, to_replica_id: ReplicaId, input: AcceptOutput) {
-        self.queue
-            .borrow_mut()
-            .push(PendingMessage::AcceptResponse(to_replica_id, input));
-    }
-}
-
-fn main() {
-    let seed: u64 = rand::thread_rng().gen();
-    println!("seed={seed}");
-
-    let rng = rand::rngs::StdRng::seed_from_u64(seed);
-
-    let bus: Rc<SimMessageBus> = Rc::new(SimMessageBus::new());
-
-    let servers = vec![1, 2, 3];
-
-    let replicas: Vec<_> = servers
-        .iter()
-        .map(|id| {
-            Rc::new(RefCell::new(Replica::new(
-                Config {
-                    id: *id,
-                    replicas: servers.clone(),
-                },
-                Rc::clone(&bus) as Rc<dyn MessageBus>,
-            )))
-        })
-        .collect();
-
-    bus.set_replicas(replicas.clone());
-
-    let mut sim = Simulator::new(
-        SimulatorConfig {
-            num_client_requests: 1,
-        },
-        rng,
-        replicas,
-        bus,
-    );
-
-    for _ in 0..100 {
-        sim.tick();
-    }
-}
+fn main() {}
 
 #[cfg(test)]
 mod tests {
