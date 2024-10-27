@@ -1,9 +1,10 @@
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, fmt::Display, rc::Rc};
 
 use rand::{rngs::StdRng, Rng};
 
 use crate::{
-    contracts,
+    activity_log::ActivityLog,
+    contracts::{self, MessageBus},
     oracle::Oracle,
     types::{AcceptInput, AcceptOutput, PrepareInput, PrepareOutput, ReplicaId},
     Replica,
@@ -42,9 +43,9 @@ impl Simulator {
     fn tick(&mut self) {
         if self.num_client_requests_sent < self.config.num_client_requests {
             let i = self.rng.gen_range(0..self.replicas.len());
-            let mut replica = self.replicas[i].as_ref().borrow_mut();
-            let replica_id = replica.config.id;
-            replica.on_start_proposal(format!("value-{}", replica_id));
+            let replica_id = self.replicas[i].borrow().config.id;
+            self.bus
+                .send_start_proposal(replica_id, format!("V({replica_id})",));
             self.num_client_requests_sent += 1;
         }
 
@@ -57,22 +58,106 @@ pub(crate) struct SimMessageBus {
     replicas: RefCell<Vec<Rc<RefCell<Replica>>>>,
     queue: RefCell<Vec<PendingMessage>>,
     oracle: RefCell<Oracle>,
+    activity_log: Rc<RefCell<ActivityLog>>,
 }
 
 #[derive(Debug)]
-enum PendingMessage {
+pub(crate) enum PendingMessage {
+    StartProposal(ReplicaId, String),
     Prepare(ReplicaId, PrepareInput),
     PrepareResponse(ReplicaId, PrepareOutput),
     Accept(ReplicaId, AcceptInput),
     AcceptResponse(ReplicaId, AcceptOutput),
 }
 
+#[derive(Debug)]
+enum EventType {
+    Queue,
+    Receive,
+}
+
+impl PendingMessage {
+    fn to_activity_log_event(&self, event_type: EventType) -> String {
+        match self {
+            PendingMessage::StartProposal(to_replica_id, value) => match event_type {
+                EventType::Queue => format!(
+                    "[BUS] Simulator QUEUED StartProposal({}) to replica {}",
+                    value, to_replica_id,
+                ),
+                EventType::Receive => format!(
+                    "[BUS] replica {} RECEIVED StartProposal({}) from Simulator",
+                    to_replica_id, value
+                ),
+            },
+
+            PendingMessage::Prepare(to_replica_id, msg) => match event_type {
+                EventType::Queue => format!(
+                    "[BUS] replica {} QUEUED Prepare({}, {}) to replica {}",
+                    msg.from_replica_id, msg.request_id, msg.proposal_number, to_replica_id
+                ),
+                EventType::Receive => format!(
+                    "[BUS] replica {} RECEIVED Prepare({}, {}) from replica {}",
+                    to_replica_id, msg.request_id, msg.proposal_number, msg.from_replica_id
+                ),
+            },
+
+            PendingMessage::PrepareResponse(to_replica_id, msg) => match event_type {
+                EventType::Queue => format!(
+                    "[BUS] replica {} QUEUED PrepareResponse({}, {:?}, {:?}) to replica {}",
+                    msg.from_replica_id,
+                    msg.request_id,
+                    msg.accepted_proposal_number,
+                    msg.accepted_value,
+                    to_replica_id,
+                ),
+                EventType::Receive => format!(
+                    "[BUS] replica {} RECEIVED PrepareResponse({}, {:?}, {:?}) from replica {}",
+                    to_replica_id,
+                    msg.request_id,
+                    msg.accepted_proposal_number,
+                    msg.accepted_value,
+                    msg.from_replica_id,
+                ),
+            },
+            PendingMessage::Accept(to_replica_id, msg) => match event_type {
+                EventType::Queue => format!(
+                    "[BUS] replica {} QUEUED Accept({}, {}, {}) to replica {}",
+                    msg.from_replica_id,
+                    msg.request_id,
+                    msg.proposal_number,
+                    msg.value,
+                    to_replica_id
+                ),
+                EventType::Receive => format!(
+                    "[BUS] replica {} RECEIVED Accept({}, {}, {}) from replica {}",
+                    to_replica_id,
+                    msg.request_id,
+                    msg.proposal_number,
+                    msg.value,
+                    msg.from_replica_id
+                ),
+            },
+            PendingMessage::AcceptResponse(to_replica_id, msg) => match event_type {
+                EventType::Queue => format!(
+                    "[BUS] replica {} QUEUED AcceptResponse({}, {}) to replica {}",
+                    msg.from_replica_id, msg.request_id, msg.min_proposal_number, to_replica_id
+                ),
+                EventType::Receive => format!(
+                    "[BUS] replica {} RECEIVED AcceptResponse({}, {}) from replica {}",
+                    to_replica_id, msg.request_id, msg.min_proposal_number, msg.from_replica_id
+                ),
+            },
+        }
+    }
+}
+
 impl SimMessageBus {
-    fn new(oracle: Oracle) -> Self {
+    fn new(oracle: Oracle, activity_log: Rc<RefCell<ActivityLog>>) -> Self {
         Self {
             replicas: RefCell::new(Vec::new()),
             queue: RefCell::new(Vec::new()),
             oracle: RefCell::new(oracle),
+            activity_log,
         }
     }
 }
@@ -104,7 +189,15 @@ impl SimMessageBus {
             queue.remove(0)
         };
 
+        self.activity_log
+            .borrow_mut()
+            .record(message.to_activity_log_event(EventType::Receive));
+
         match message {
+            PendingMessage::StartProposal(to_replica_id, value) => {
+                let replica = self.find_replica(to_replica_id);
+                replica.borrow_mut().on_start_proposal(value);
+            }
             PendingMessage::Prepare(to_replica_id, input) => {
                 let replica = self.find_replica(to_replica_id);
                 replica.borrow_mut().on_prepare(input);
@@ -135,33 +228,50 @@ impl SimMessageBus {
 }
 
 impl contracts::MessageBus for SimMessageBus {
-    fn send_prepare(&self, to_replica_id: ReplicaId, input: PrepareInput) {
-        self.queue
+    fn send_start_proposal(&self, to_replica_id: ReplicaId, value: String) {
+        let message = PendingMessage::StartProposal(to_replica_id, value);
+        self.activity_log
             .borrow_mut()
-            .push(PendingMessage::Prepare(to_replica_id, input));
+            .record(message.to_activity_log_event(EventType::Queue));
+        self.queue.borrow_mut().push(message);
+    }
+
+    fn send_prepare(&self, to_replica_id: ReplicaId, input: PrepareInput) {
+        let message = PendingMessage::Prepare(to_replica_id, input);
+        self.activity_log
+            .borrow_mut()
+            .record(message.to_activity_log_event(EventType::Queue));
+        self.queue.borrow_mut().push(message);
     }
 
     fn send_prepare_response(&self, to_replica_id: ReplicaId, input: PrepareOutput) {
-        self.queue
+        let message = PendingMessage::PrepareResponse(to_replica_id, input);
+        self.activity_log
             .borrow_mut()
-            .push(PendingMessage::PrepareResponse(to_replica_id, input));
+            .record(message.to_activity_log_event(EventType::Queue));
+        self.queue.borrow_mut().push(message);
     }
 
     fn send_accept(&self, to_replica_id: ReplicaId, input: AcceptInput) {
-        self.queue
+        let message = PendingMessage::Accept(to_replica_id, input);
+        self.activity_log
             .borrow_mut()
-            .push(PendingMessage::Accept(to_replica_id, input));
+            .record(message.to_activity_log_event(EventType::Queue));
+        self.queue.borrow_mut().push(message);
     }
 
     fn send_accept_response(&self, to_replica_id: ReplicaId, input: AcceptOutput) {
-        self.queue
+        let message = PendingMessage::AcceptResponse(to_replica_id, input);
+        self.activity_log
             .borrow_mut()
-            .push(PendingMessage::AcceptResponse(to_replica_id, input));
+            .record(message.to_activity_log_event(EventType::Queue));
+        self.queue.borrow_mut().push(message);
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use quickcheck::quickcheck;
     use rand::SeedableRng;
 
     use crate::{Config, Replica};
@@ -175,9 +285,14 @@ mod tests {
 
         let rng = rand::rngs::StdRng::seed_from_u64(seed);
 
+        let activity_log = Rc::new(RefCell::new(ActivityLog::new()));
+
         let servers = vec![1, 2, 3];
 
-        let bus: Rc<SimMessageBus> = Rc::new(SimMessageBus::new(Oracle::new(servers.len())));
+        let bus: Rc<SimMessageBus> = Rc::new(SimMessageBus::new(
+            Oracle::new(servers.len(), Rc::clone(&activity_log)),
+            Rc::clone(&activity_log),
+        ));
 
         let replicas: Vec<_> = servers
             .iter()
@@ -196,7 +311,58 @@ mod tests {
 
         let mut sim = Simulator::new(
             SimulatorConfig {
-                num_client_requests: 1,
+                num_client_requests: 3,
+            },
+            rng,
+            replicas,
+            Rc::clone(&bus),
+        );
+
+        for _ in 0..1000 {
+            sim.tick();
+        }
+
+        activity_log.borrow().debug();
+    }
+
+    quickcheck! {
+      #[test]
+      fn basic_quickcheck(seed: u64, num_client_requests: u32) -> bool {
+        // Number of client requests between 1 and 10.
+        let num_client_requests = num_client_requests % 3 + 1;
+        dbg!(num_client_requests);
+
+        let rng = rand::rngs::StdRng::seed_from_u64(seed);
+
+        let servers = vec![1, 2, 3];
+
+        let activity_log = Rc::new(RefCell::new(ActivityLog::new()));
+
+        let bus: Rc<SimMessageBus> = Rc::new(
+          SimMessageBus::new(
+            Oracle::new(servers.len(),Rc::clone(&activity_log)),
+            Rc::clone(&activity_log),
+          )
+        );
+
+        let replicas: Vec<_> = servers
+            .iter()
+            .map(|id| {
+                Rc::new(RefCell::new(Replica::new(
+                    Config {
+                        id: *id,
+                        replicas: servers.clone(),
+                    },
+                    Rc::clone(&bus) as Rc<dyn contracts::MessageBus>,
+                )))
+            })
+            .collect();
+
+        bus.set_replicas(replicas.clone());
+
+        let mut sim = Simulator::new(
+            SimulatorConfig {
+                num_client_requests,
             },
             rng,
             replicas,
@@ -206,5 +372,8 @@ mod tests {
         for _ in 0..100 {
             sim.tick();
         }
+
+        true
+      }
     }
 }

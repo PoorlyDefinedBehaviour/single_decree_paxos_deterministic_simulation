@@ -1,3 +1,5 @@
+use std::fmt::{Display, Write};
+
 pub(crate) type ReplicaId = u32;
 pub(crate) type ProposalNumber = u64;
 
@@ -5,6 +7,20 @@ pub(crate) type ProposalNumber = u64;
 pub(crate) enum RequestId {
     Prepare(ReplicaId, ProposalNumber),
     Accept(ReplicaId, ProposalNumber),
+}
+
+impl Display for RequestId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RequestId::Prepare(replica_id, proposal_number) => {
+                f.write_fmt(format_args!("RID({replica_id}, {proposal_number})"))?;
+            }
+            RequestId::Accept(replica_id, proposal_number) => {
+                f.write_fmt(format_args!("RID({replica_id}-{proposal_number})"))?;
+            }
+        };
+        std::fmt::Result::Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]

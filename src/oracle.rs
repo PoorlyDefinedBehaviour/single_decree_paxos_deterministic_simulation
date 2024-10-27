@@ -1,9 +1,17 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+    rc::Rc,
+};
 
-use crate::types::{AcceptInput, AcceptOutput, PrepareInput, PrepareOutput, ReplicaId, RequestId};
+use crate::{
+    activity_log::ActivityLog,
+    types::{AcceptInput, AcceptOutput, PrepareOutput, ReplicaId, RequestId},
+};
 
 #[derive(Debug)]
 pub(crate) struct Oracle {
+    activity_log: Rc<RefCell<ActivityLog>>,
     num_replicas: usize,
     // TODO: remove old requests.
     inflight_accept_requests: HashMap<RequestId, InflightAcceptRequest>,
@@ -26,8 +34,9 @@ impl InflightAcceptRequest {
 }
 
 impl Oracle {
-    pub fn new(num_replicas: usize) -> Self {
+    pub fn new(num_replicas: usize, activity_log: Rc<RefCell<ActivityLog>>) -> Self {
         Self {
+            activity_log,
             inflight_accept_requests: HashMap::new(),
             num_replicas,
             decided_value: None,
@@ -38,9 +47,7 @@ impl Oracle {
         self.num_replicas / 2 + 1
     }
 
-    pub fn on_prepare_response_sent(&self, to_replica_id: ReplicaId, output: &PrepareOutput) {
-        dbg!(output);
-    }
+    pub fn on_prepare_response_sent(&self, to_replica_id: ReplicaId, output: &PrepareOutput) {}
 
     pub fn on_accept_sent(&mut self, to_replica_id: ReplicaId, input: &AcceptInput) {
         self.inflight_accept_requests.insert(
@@ -51,10 +58,7 @@ impl Oracle {
 
     pub fn on_proposal_accepted(&mut self, to_replica_id: ReplicaId, output: &AcceptOutput) {
         let majority = self.majority();
-        println!(
-            "replica {} accepted proposal {output:?} from replica {to_replica_id}",
-            output.from_replica_id
-        );
+
         if let Some(req) = self.inflight_accept_requests.get_mut(&output.request_id) {
             req.responses.insert(output.to_owned());
             if req.responses.len() < majority {
@@ -67,7 +71,10 @@ impl Oracle {
                 assert_eq!(self.decided_value.as_ref(), Some(&req.value));
             }
 
-            println!("oracle: decided on value: {:?}", self.decided_value);
+            self.activity_log.borrow_mut().record(format!(
+                "[ORACLE] value accepted by majority of replicas: {}",
+                self.decided_value.as_ref().unwrap()
+            ));
         }
     }
 }
