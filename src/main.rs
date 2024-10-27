@@ -68,7 +68,6 @@ impl Replica {
     }
 
     fn on_start_proposal(&mut self, value: String) {
-        println!("replica {} start proposal", self.config.id);
         let proposal_number = self.next_proposal_number();
         self.broadcast_prepare(proposal_number, value);
     }

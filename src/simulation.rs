@@ -13,7 +13,7 @@ use crate::{
 #[derive(Debug)]
 pub(crate) struct Simulator {
     config: SimulatorConfig,
-    rng: StdRng,
+    rng: Rc<RefCell<StdRng>>,
     replicas: Vec<Rc<RefCell<Replica>>>,
     bus: Rc<SimMessageBus>,
     num_client_requests_sent: u32,
@@ -27,7 +27,7 @@ pub(crate) struct SimulatorConfig {
 impl Simulator {
     fn new(
         config: SimulatorConfig,
-        rng: StdRng,
+        rng: Rc<RefCell<StdRng>>,
         replicas: Vec<Rc<RefCell<Replica>>>,
         bus: Rc<SimMessageBus>,
     ) -> Self {
@@ -42,7 +42,7 @@ impl Simulator {
 
     fn tick(&mut self) {
         if self.num_client_requests_sent < self.config.num_client_requests {
-            let i = self.rng.gen_range(0..self.replicas.len());
+            let i = self.rng.borrow_mut().gen_range(0..self.replicas.len());
             let replica_id = self.replicas[i].borrow().config.id;
             self.bus
                 .send_start_proposal(replica_id, format!("V({replica_id})",));
@@ -55,10 +55,41 @@ impl Simulator {
 
 #[derive(Debug)]
 pub(crate) struct SimMessageBus {
+    rng: Rc<RefCell<StdRng>>,
     replicas: RefCell<Vec<Rc<RefCell<Replica>>>>,
-    queue: RefCell<Vec<PendingMessage>>,
+    queue: RefCell<MessageQueue>,
     oracle: RefCell<Oracle>,
     activity_log: Rc<RefCell<ActivityLog>>,
+}
+
+#[derive(Debug)]
+struct MessageQueue {
+    rng: Rc<RefCell<StdRng>>,
+    items: Vec<PendingMessage>,
+}
+
+impl MessageQueue {
+    fn new(rng: Rc<RefCell<StdRng>>) -> Self {
+        Self {
+            rng,
+            items: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, message: PendingMessage) {
+        self.items.push(message);
+    }
+
+    // Pops a message from the queue. Messages may be delivered in any order.
+    fn pop(&mut self) -> Option<PendingMessage> {
+        if self.items.is_empty() {
+            return None;
+        }
+
+        let i = self.rng.borrow_mut().gen_range(0..self.items.len());
+        let item = self.items.remove(i);
+        Some(item)
+    }
 }
 
 #[derive(Debug)]
@@ -152,10 +183,15 @@ impl PendingMessage {
 }
 
 impl SimMessageBus {
-    fn new(oracle: Oracle, activity_log: Rc<RefCell<ActivityLog>>) -> Self {
+    fn new(
+        rng: Rc<RefCell<StdRng>>,
+        oracle: Oracle,
+        activity_log: Rc<RefCell<ActivityLog>>,
+    ) -> Self {
         Self {
             replicas: RefCell::new(Vec::new()),
-            queue: RefCell::new(Vec::new()),
+            queue: RefCell::new(MessageQueue::new(Rc::clone(&rng))),
+            rng,
             oracle: RefCell::new(oracle),
             activity_log,
         }
@@ -181,12 +217,15 @@ impl SimMessageBus {
     }
 
     fn tick(&self) {
-        let message = {
-            let mut queue = self.queue.borrow_mut();
-            if queue.is_empty() {
-                return;
-            }
-            queue.remove(0)
+        // let message = {
+        //     let mut queue = self.queue.borrow_mut();
+        //     if queue.is_empty() {
+        //         return;
+        //     }
+        //     queue.remove(0)
+        // };
+        let Some(message) = self.queue.borrow_mut().pop() else {
+            return;
         };
 
         self.activity_log
@@ -283,13 +322,14 @@ mod tests {
         let seed: u64 = rand::thread_rng().gen();
         println!("seed={seed}");
 
-        let rng = rand::rngs::StdRng::seed_from_u64(seed);
+        let rng = Rc::new(RefCell::new(rand::rngs::StdRng::seed_from_u64(seed)));
 
         let activity_log = Rc::new(RefCell::new(ActivityLog::new()));
 
         let servers = vec![1, 2, 3];
 
         let bus: Rc<SimMessageBus> = Rc::new(SimMessageBus::new(
+            Rc::clone(&rng),
             Oracle::new(servers.len(), Rc::clone(&activity_log)),
             Rc::clone(&activity_log),
         ));
@@ -332,7 +372,7 @@ mod tests {
         let num_client_requests = num_client_requests % 3 + 1;
         dbg!(num_client_requests);
 
-        let rng = rand::rngs::StdRng::seed_from_u64(seed);
+        let rng = Rc::new(RefCell::new(rand::rngs::StdRng::seed_from_u64(seed)));
 
         let servers = vec![1, 2, 3];
 
@@ -340,6 +380,7 @@ mod tests {
 
         let bus: Rc<SimMessageBus> = Rc::new(
           SimMessageBus::new(
+            Rc::clone(&rng),
             Oracle::new(servers.len(),Rc::clone(&activity_log)),
             Rc::clone(&activity_log),
           )
