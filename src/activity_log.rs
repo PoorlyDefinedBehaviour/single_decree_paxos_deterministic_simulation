@@ -1,28 +1,33 @@
-use crate::{simulation::PendingMessage, types::ReplicaId};
-
 #[derive(Debug)]
 pub(crate) struct ActivityLog {
-    pub events: Vec<String>,
+    buffer: Vec<String>,
 }
 
 impl ActivityLog {
     pub fn new() -> Self {
-        Self { events: Vec::new() }
-    }
-
-    pub fn debug(&self) {
-        for event in self.events.iter() {
-            println!("{event}");
-        }
+        Self { buffer: Vec::new() }
     }
 
     pub fn record(&mut self, event: String) {
-        self.events.push(event);
+        self.buffer.push(event);
+        if self.buffer.len() >= 64 {
+            self.print_events();
+        }
+    }
+
+    pub fn print_events(&mut self) {
+        if self.buffer.is_empty() {
+            return;
+        }
+
+        let message = self.buffer.join("\n");
+        println!("{message}");
+        self.buffer.clear();
     }
 }
 
 impl Drop for ActivityLog {
     fn drop(&mut self) {
-        self.debug();
+        self.print_events();
     }
 }
