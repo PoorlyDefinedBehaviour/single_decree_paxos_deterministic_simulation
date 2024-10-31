@@ -1,4 +1,4 @@
-use std::fmt::{Display, Write};
+use std::fmt::Display;
 
 pub(crate) type ReplicaId = u32;
 pub(crate) type ProposalNumber = u64;

@@ -1,6 +1,10 @@
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, collections::HashSet, rc::Rc};
 
-use rand::{rngs::StdRng, Rng};
+use rand::{
+    rngs::StdRng,
+    seq::{IteratorRandom, SliceRandom},
+    Rng,
+};
 
 use crate::{
     activity_log::ActivityLog,
@@ -9,6 +13,205 @@ use crate::{
     types::{AcceptInput, AcceptOutput, PrepareInput, PrepareOutput, ReplicaId},
     Replica,
 };
+
+#[derive(Debug)]
+struct ActionSimulator {
+    config: ActionSimulatorConfig,
+    metrics: ActionSimulatorMetrics,
+    rng: Rc<RefCell<StdRng>>,
+    bus: Rc<SimMessageBus>,
+    replicas: Vec<Replica>,
+    oracle: Oracle,
+    healthy_replicas: HashSet<ReplicaId>,
+    failed_replicas: HashSet<ReplicaId>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ActionSimulatorConfig {
+    max_actions: u32,
+    max_user_requests: u32,
+    max_replica_crashes: u32,
+    max_replica_restarts: u32,
+}
+
+#[derive(Debug)]
+struct ActionSimulatorMetrics {
+    num_user_requests_sent: u32,
+    num_replica_crashes: u32,
+    num_replica_restarts: u32,
+}
+
+impl ActionSimulatorMetrics {
+    fn new() -> Self {
+        Self {
+            num_user_requests_sent: 0,
+            num_replica_crashes: 0,
+            num_replica_restarts: 0,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum Action {
+    SendUserRequest,
+    CrashReplica,
+    RestartReplica,
+    DeliverMessage,
+}
+
+impl ActionSimulator {
+    fn new(
+        config: ActionSimulatorConfig,
+        rng: Rc<RefCell<StdRng>>,
+        replicas: Vec<Replica>,
+        bus: Rc<SimMessageBus>,
+        oracle: Oracle,
+    ) -> Self {
+        Self {
+            config,
+            rng,
+            bus,
+            oracle,
+            healthy_replicas: HashSet::from_iter(replicas.iter().map(|r| r.config.id)),
+            failed_replicas: HashSet::new(),
+            replicas,
+            metrics: ActionSimulatorMetrics::new(),
+        }
+    }
+
+    fn majority(&self) -> usize {
+        self.replicas.len() / 2 + 1
+    }
+
+    fn next_action(&mut self) -> Action {
+        loop {
+            let n: u8 = self.rng.borrow_mut().gen::<u8>() % 4;
+            match n {
+                0 => {
+                    if self.metrics.num_user_requests_sent < self.config.max_user_requests {
+                        self.metrics.num_user_requests_sent += 1;
+                        return Action::SendUserRequest;
+                    }
+                }
+                1 => {
+                    if self.metrics.num_replica_crashes < self.config.max_replica_crashes {
+                        self.metrics.num_replica_crashes += 1;
+                        return Action::CrashReplica;
+                    }
+                }
+                2 => {
+                    if self.metrics.num_replica_restarts < self.config.max_replica_restarts {
+                        self.metrics.num_replica_restarts += 1;
+                        return Action::RestartReplica;
+                    }
+                }
+                3 => return Action::DeliverMessage,
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    fn choose_healthy_replica(&mut self) -> &Replica {
+        let replicas = self
+            .replicas
+            .iter()
+            .filter(|r| self.healthy_replicas.contains(&r.config.id));
+        replicas.choose(unsafe { &mut *self.rng.as_ptr() }).unwrap()
+    }
+
+    fn choose_any_replica(&mut self) -> &Replica {
+        self.replicas
+            .choose(unsafe { &mut *self.rng.as_ptr() })
+            .unwrap()
+    }
+
+    fn get_healthy_replicas_mut(&mut self) -> Vec<&mut Replica> {
+        self.replicas
+            .iter_mut()
+            .filter(|r| self.healthy_replicas.contains(&r.config.id))
+            .collect()
+    }
+
+    fn get_healthy_replica_mut(&mut self, replica_id: ReplicaId) -> Option<&mut Replica> {
+        self.replicas
+            .iter_mut()
+            .find(|r| self.healthy_replicas.contains(&r.config.id))
+    }
+
+    fn run(&mut self) {
+        for i in 0..self.config.max_actions {
+            match dbg!(self.next_action()) {
+                Action::SendUserRequest => {
+                    let replica_id = {
+                        let replica = self.choose_healthy_replica();
+                        replica.config.id
+                    };
+                    let value = format!("V({}-{})", replica_id, i);
+                    self.bus.send_start_proposal(replica_id, value);
+                }
+                Action::CrashReplica => {
+                    if self.healthy_replicas.len() > self.majority() {
+                        let replica_id = {
+                            let replica = self.choose_healthy_replica();
+                            replica.config.id
+                        };
+                        self.healthy_replicas.remove(&replica_id);
+                        self.failed_replicas.insert(replica_id);
+                    }
+                }
+                Action::RestartReplica => {
+                    let replica_id = {
+                        let replica = self.choose_any_replica();
+                        replica.config.id
+                    };
+                    self.failed_replicas.remove(&replica_id);
+                    self.healthy_replicas.insert(replica_id);
+                }
+                Action::DeliverMessage => {
+                    if let Some(message) = self.bus.next_message() {
+                        self.deliver_message(message);
+                    }
+                }
+            }
+        }
+
+        while let Some(message) = self.bus.next_message() {
+            self.deliver_message(message);
+        }
+    }
+
+    fn deliver_message(&mut self, message: PendingMessage) {
+        match message {
+            PendingMessage::StartProposal(to_replica_id, value) => {
+                if let Some(replica) = self.get_healthy_replica_mut(to_replica_id) {
+                    replica.on_start_proposal(value);
+                }
+            }
+            PendingMessage::Prepare(to_replica_id, input) => {
+                if let Some(replica) = self.get_healthy_replica_mut(to_replica_id) {
+                    replica.on_prepare(input);
+                }
+            }
+            PendingMessage::PrepareResponse(to_replica_id, input) => {
+                if let Some(replica) = self.get_healthy_replica_mut(to_replica_id) {
+                    replica.on_prepare_response(input);
+                }
+            }
+            PendingMessage::Accept(to_replica_id, input) => {
+                self.oracle.on_accept_sent(to_replica_id, &input);
+                if let Some(replica) = self.get_healthy_replica_mut(to_replica_id) {
+                    replica.on_accept(input);
+                }
+            }
+            PendingMessage::AcceptResponse(to_replica_id, input) => {
+                self.oracle.on_proposal_accepted(to_replica_id, &input);
+                if let Some(replica) = self.get_healthy_replica_mut(to_replica_id) {
+                    replica.on_accept_response(input);
+                }
+            }
+        }
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct Simulator {
@@ -49,35 +252,34 @@ impl Simulator {
     }
 
     fn tick(&mut self) {
-        if self.num_user_requests_sent < self.config.max_user_requests
-            && self
-                .rng
-                .borrow_mut()
-                .gen_bool(self.config.send_user_request_probability)
-        {
-            let i = self
-                .rng
-                .as_ref()
-                .borrow_mut()
-                .gen_range(0..self.healthy_replicas.len());
-            let replica_id = self.healthy_replicas[i].config.id;
-            self.bus.send_start_proposal(
-                replica_id,
-                format!("V({replica_id}-{})", self.num_user_requests_sent),
-            );
-            self.num_user_requests_sent += 1;
-        }
+        // if self.num_user_requests_sent < self.config.max_user_requests
+        //     && self
+        //         .rng
+        //         .borrow_mut()
+        //         .gen_bool(self.config.send_user_request_probability)
+        // {
+        //     let i = self
+        //         .rng
+        //         .as_ref()
+        //         .borrow_mut()
+        //         .gen_range(0..self.healthy_replicas.len());
+        //     let replica_id = self.healthy_replicas[i].config.id;
+        //     self.bus.send_start_proposal(
+        //         replica_id,
+        //         format!("V({replica_id}-{})", self.num_user_requests_sent),
+        //     );
+        //     self.num_user_requests_sent += 1;
+        // }
 
-        self.failure_injector
-            .tick(&mut self.healthy_replicas, &mut self.failed_replicas);
+        // self.failure_injector
+        //     .tick(&mut self.healthy_replicas, &mut self.failed_replicas);
 
-        self.bus.tick(&mut self.healthy_replicas);
+        // self.bus.tick(&mut self.healthy_replicas);
     }
 }
 
 #[derive(Debug)]
 pub(crate) struct SimMessageBus {
-    rng: Rc<RefCell<StdRng>>,
     queue: RefCell<MessageQueue>,
     oracle: RefCell<Oracle>,
     activity_log: Rc<RefCell<ActivityLog>>,
@@ -215,7 +417,7 @@ impl SimMessageBus {
     ) -> Self {
         Self {
             queue: RefCell::new(MessageQueue::new(Rc::clone(&rng))),
-            rng,
+
             oracle: RefCell::new(oracle),
             activity_log,
         }
@@ -229,6 +431,17 @@ impl SimMessageBus {
         replica_id: ReplicaId,
     ) -> Option<&'a mut Replica> {
         replicas.iter_mut().find(|r| r.config.id == replica_id)
+    }
+
+    fn next_message(&self) -> Option<PendingMessage> {
+        let message = self.queue.borrow_mut().pop()?;
+
+        self.activity_log
+            .as_ref()
+            .borrow_mut()
+            .record(message.to_activity_log_event(EventType::Receive));
+
+        Some(message)
     }
 
     fn tick(&self, healthy_replicas: &mut [Replica]) {
@@ -389,6 +602,58 @@ mod tests {
     use crate::{Config, Replica};
 
     use super::*;
+
+    #[test]
+    fn action_simulation() -> Result<()> {
+        let seed: u64 = rand::thread_rng().gen();
+        println!("seed={seed}");
+
+        let rng = Rc::new(RefCell::new(rand::rngs::StdRng::seed_from_u64(seed)));
+
+        let activity_log = Rc::new(RefCell::new(ActivityLog::new()));
+
+        let servers = vec![1, 2, 3];
+
+        let majority = servers.len() / 2 + 1;
+
+        let bus: Rc<SimMessageBus> = Rc::new(SimMessageBus::new(
+            Rc::clone(&rng),
+            Oracle::new(majority, Rc::clone(&activity_log)),
+            Rc::clone(&activity_log),
+        ));
+
+        let replicas: Vec<_> = servers
+            .iter()
+            .map(|id| {
+                Replica::new(
+                    Config {
+                        id: *id,
+                        replicas: servers.clone(),
+                    },
+                    Rc::clone(&bus) as Rc<dyn contracts::MessageBus>,
+                )
+            })
+            .collect();
+
+        let mut sim = ActionSimulator::new(
+            ActionSimulatorConfig {
+                max_actions: 10_000,
+                max_user_requests: 10,
+                max_replica_crashes: 3,
+                max_replica_restarts: 10,
+            },
+            Rc::clone(&rng),
+            replicas,
+            Rc::clone(&bus),
+            Oracle::new(majority, Rc::clone(&activity_log)),
+        );
+
+        sim.run();
+
+        assert!(sim.bus.queue.borrow().items.is_empty());
+
+        Ok(())
+    }
 
     #[test]
     fn basic_simulation() -> Result<()> {
