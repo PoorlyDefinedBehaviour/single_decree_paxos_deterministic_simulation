@@ -73,7 +73,7 @@ impl Replica {
     }
 
     fn on_prepare(&mut self, input: PrepareInput) {
-        if input.proposal_number > self.min_proposal_number {
+        if input.proposal_number >= self.min_proposal_number {
             self.min_proposal_number = input.proposal_number;
             self.bus.send_prepare_response(
                 input.from_replica_id,

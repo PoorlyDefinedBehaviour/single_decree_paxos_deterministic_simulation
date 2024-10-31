@@ -43,8 +43,6 @@ impl Oracle {
         }
     }
 
-    pub fn on_prepare_response_sent(&self, to_replica_id: ReplicaId, output: &PrepareOutput) {}
-
     pub fn on_accept_sent(&mut self, to_replica_id: ReplicaId, input: &AcceptInput) {
         self.inflight_accept_requests.insert(
             input.request_id,

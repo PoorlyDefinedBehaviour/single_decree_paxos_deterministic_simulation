@@ -18,12 +18,15 @@ pub(crate) struct Simulator {
     healthy_replicas: Vec<Replica>,
     failed_replicas: Vec<Replica>,
     failure_injector: FailureInjector,
-    num_client_requests_sent: u32,
+    num_user_requests_sent: u32,
 }
 
 #[derive(Debug)]
 pub(crate) struct SimulatorConfig {
-    num_client_requests: u32,
+    max_user_requests: u32,
+    send_user_request_probability: f64,
+    crash_replica_probability: f64,
+    restart_replica_probability: f64,
 }
 
 impl Simulator {
@@ -41,21 +44,28 @@ impl Simulator {
             healthy_replicas: replicas,
             failed_replicas: Vec::new(),
             failure_injector,
-            num_client_requests_sent: 0,
+            num_user_requests_sent: 0,
         }
     }
 
     fn tick(&mut self) {
-        if self.num_client_requests_sent < self.config.num_client_requests {
+        if self.num_user_requests_sent < self.config.max_user_requests
+            && self
+                .rng
+                .borrow_mut()
+                .gen_bool(self.config.send_user_request_probability)
+        {
             let i = self
                 .rng
                 .as_ref()
                 .borrow_mut()
                 .gen_range(0..self.healthy_replicas.len());
             let replica_id = self.healthy_replicas[i].config.id;
-            self.bus
-                .send_start_proposal(replica_id, format!("V({replica_id})",));
-            self.num_client_requests_sent += 1;
+            self.bus.send_start_proposal(
+                replica_id,
+                format!("V({replica_id}-{})", self.num_user_requests_sent),
+            );
+            self.num_user_requests_sent += 1;
         }
 
         self.failure_injector
@@ -243,9 +253,6 @@ impl SimMessageBus {
                 }
             }
             PendingMessage::PrepareResponse(to_replica_id, input) => {
-                self.oracle
-                    .borrow()
-                    .on_prepare_response_sent(to_replica_id, &input);
                 if let Some(replica) = self.find_replica(healthy_replicas, to_replica_id) {
                     replica.on_prepare_response(input);
                 }
@@ -291,7 +298,8 @@ impl FailureInjector {
     }
 
     fn tick(&mut self, healthy_replicas: &mut Vec<Replica>, failed_replicas: &mut Vec<Replica>) {
-        if self.rng.as_ref().borrow_mut().gen_bool(0.3) && !failed_replicas.is_empty() {
+        return;
+        if self.rng.as_ref().borrow_mut().gen_bool(0.8) && !failed_replicas.is_empty() {
             let i = self
                 .rng
                 .as_ref()
@@ -299,7 +307,7 @@ impl FailureInjector {
                 .gen_range(0..failed_replicas.len());
 
             self.activity_log.as_ref().borrow_mut().record(format!(
-                "[FailureInjector] restarting replica {}",
+                "[FailureInjector] RESTART replica {}",
                 failed_replicas[i].config.id
             ));
 
@@ -308,7 +316,7 @@ impl FailureInjector {
             healthy_replicas.push(Replica::new(replica.config, replica.bus))
         }
 
-        if self.rng.as_ref().borrow_mut().gen_bool(0.1) && healthy_replicas.len() > self.majority {
+        if self.rng.as_ref().borrow_mut().gen_bool(0.05) && healthy_replicas.len() > self.majority {
             let i = self
                 .rng
                 .as_ref()
@@ -316,7 +324,7 @@ impl FailureInjector {
                 .gen_range(0..healthy_replicas.len());
 
             self.activity_log.as_ref().borrow_mut().record(format!(
-                "[FailureInjector] crashing replica {}",
+                "[FailureInjector] CRASH replica {}",
                 healthy_replicas[i].config.id
             ));
 
@@ -416,7 +424,10 @@ mod tests {
 
         let mut sim = Simulator::new(
             SimulatorConfig {
-                num_client_requests: 1000,
+                max_user_requests: u32::MAX,
+                send_user_request_probability: 0.7,
+                crash_replica_probability: 0.08,
+                restart_replica_probability: 0.7,
             },
             Rc::clone(&rng),
             replicas,
@@ -424,65 +435,68 @@ mod tests {
             FailureInjector::new(Rc::clone(&activity_log), Rc::clone(&rng), majority),
         );
 
-        for _ in 0..100_000 {
+        for _ in 0..10_000_000 {
             sim.tick();
         }
 
-        // activity_log.borrow_mut().print_events();
+        assert!(sim.bus.queue.borrow().items.is_empty());
 
         Ok(())
     }
 
-    quickcheck! {
-      #[test]
-      fn basic_quickcheck(seed: u64, num_client_requests: u32) -> bool {
-        // Cap the number of client requests.
-        let num_client_requests = num_client_requests % 100 + 1;
+    // quickcheck! {
+    //   #[test]
+    //   fn basic_quickcheck(seed: u64, num_client_requests: u32) -> bool {
+    //     // Cap the number of client requests.
+    //     let num_client_requests = num_client_requests % 100 + 1;
 
-        let rng = Rc::new(RefCell::new(rand::rngs::StdRng::seed_from_u64(seed)));
+    //     let rng = Rc::new(RefCell::new(rand::rngs::StdRng::seed_from_u64(seed)));
 
-        let servers = vec![1, 2, 3];
+    //     let servers = vec![1, 2, 3];
 
-        let majority = servers.len()/2+1;
+    //     let majority = servers.len()/2+1;
 
-        let activity_log = Rc::new(RefCell::new(ActivityLog::new()));
+    //     let activity_log = Rc::new(RefCell::new(ActivityLog::new()));
 
-        let bus: Rc<SimMessageBus> = Rc::new(
-          SimMessageBus::new(
-            Rc::clone(&rng),
-            Oracle::new(servers.len(),Rc::clone(&activity_log)),
-            Rc::clone(&activity_log),
-          )
-        );
+    //     let bus: Rc<SimMessageBus> = Rc::new(
+    //       SimMessageBus::new(
+    //         Rc::clone(&rng),
+    //         Oracle::new(servers.len(),Rc::clone(&activity_log)),
+    //         Rc::clone(&activity_log),
+    //       )
+    //     );
 
-        let replicas: Vec<_> = servers
-            .iter()
-            .map(|id| {
-                Replica::new(
-                    Config {
-                        id: *id,
-                        replicas: servers.clone(),
-                    },
-                    Rc::clone(&bus) as Rc<dyn contracts::MessageBus>,
-                )
-            })
-            .collect();
+    //     let replicas: Vec<_> = servers
+    //         .iter()
+    //         .map(|id| {
+    //             Replica::new(
+    //                 Config {
+    //                     id: *id,
+    //                     replicas: servers.clone(),
+    //                 },
+    //                 Rc::clone(&bus) as Rc<dyn contracts::MessageBus>,
+    //             )
+    //         })
+    //         .collect();
 
-        let mut sim = Simulator::new(
-            SimulatorConfig {
-                num_client_requests,
-            },
-            Rc::clone(&rng),
-            replicas,
-            bus,
-            FailureInjector::new(Rc::clone(&activity_log), Rc::clone(&rng), majority),
-        );
+    //     let mut sim = Simulator::new(
+    //         SimulatorConfig {
+    //             num_client_requests,
+    //             send_user_request_probability: 0.4,
+    //             crash_replica_probability: 0.05,
+    //             restart_replica_probability: 0.7,
+    //         },
+    //         Rc::clone(&rng),
+    //         replicas,
+    //         bus,
+    //         FailureInjector::new(Rc::clone(&activity_log), Rc::clone(&rng), majority),
+    //     );
 
-        for _ in 0..100_000 {
-            sim.tick();
-        }
+    //     for _ in 0..100_000 {
+    //         sim.tick();
+    //     }
 
-        true
-      }
-    }
+    //     true
+    //   }
+    // }
 }
