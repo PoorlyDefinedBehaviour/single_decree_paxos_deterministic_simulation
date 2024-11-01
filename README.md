@@ -50,6 +50,63 @@ seed=5723938277135031087
 [BUS] replica 2 RECEIVED Prepare(RID(3, 1), 1) from replica 3
 ```
 
+## Reproducible bugs
+
+```
+SEED=10557757033859378776 cargo t action_simulation -- --nocapture > out.txt
+```
+
+Modify `Replica::on_prepare` to accept proposal numbers that are not strictly greater than the min proposal number:
+```diff
+fn on_prepare(&mut self, input: PrepareInput) {
+      - if input.proposal_number > self.min_proposal_number {
+      -     ...
+      - }
+      + if input.proposal_number >= self.min_proposal_number {
+      +     ...
+      + }
+    }
+```
+
+```
+SEED=8105078063114987579 cargo t action_simulation -- --nocapture > out.txt
+```
+
+Modify `Replica::on_prepare_response` to not include the value returned by the replica with the greatest proposal number in the next accept request.
+
+```diff
+    fn on_prepare_response(&mut self, input: PrepareOutput) {
+        ...
+            -let value = req
+            -    .responses
+            -    .iter()
+            -    .filter(|response| response.accepted_proposal_number.is_some())
+            -    .max_by_key(|response| response.accepted_proposal_number)
+            -    .map(|response| response.accepted_value.clone().unwrap())
+            -    .unwrap_or_else(|| req.proposed_value.clone().unwrap());
+            +let value = req.proposed_value.clone().unwrap();
+          ...
+    }
+```
+
+```
+SEED=1582355565138672611 cargo t action_simulation -- --nocapture > out.txt
+```
+
+Modify `Replica::on_accept` to stop saving the state to durable storage.
+
+```diff
+fn on_accept(&mut self, input: AcceptInput) {
+    if input.proposal_number >= self.state.min_proposal_number {
+        self.state.accepted_proposal_number = Some(input.proposal_number);
+        self.state.accepted_value = Some(input.value);
+        -self.storage.store(&self.state);
+        +// self.storage.store(&self.state);
+      ...
+    }
+}
+```
+
 ## TODO
 
 - Activity log like P-Lang has.

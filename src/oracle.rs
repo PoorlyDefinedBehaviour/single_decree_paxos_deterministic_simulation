@@ -10,7 +10,7 @@ use crate::{
 };
 
 #[derive(Debug)]
-pub(crate) struct Oracle {
+pub struct Oracle {
     activity_log: Rc<RefCell<ActivityLog>>,
     majority: usize,
     // TODO: remove old requests.
@@ -57,7 +57,17 @@ impl Oracle {
                 return;
             }
 
-            println!("aaaaa decided on {}", req.value);
+            self.activity_log.borrow_mut().record(format!(
+                "[ORACLE] value accepted by majority of replicas: majority={} {} value={} replicas={:?}",
+                self.majority,
+                output.request_id,
+                req.value.as_str(),
+                req.responses
+                    .iter()
+                    .map(|response| response.from_replica_id)
+                    .collect::<Vec<_>>(),
+                    
+            ));
 
             if self.decided_value.is_none() {
                 self.decided_value = Some(req.value.clone());
@@ -68,11 +78,6 @@ impl Oracle {
                     "majority of replicas decided on a different value after a value was accepted"
                 );
             }
-
-            self.activity_log.borrow_mut().record(format!(
-                "[ORACLE] value accepted by majority of replicas: {}",
-                self.decided_value.as_ref().unwrap()
-            ));
         }
     }
 }

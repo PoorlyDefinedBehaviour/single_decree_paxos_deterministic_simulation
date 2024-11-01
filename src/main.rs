@@ -1,30 +1,27 @@
 use std::{
-    cell::RefCell,
     collections::{HashMap, HashSet},
     rc::Rc,
 };
 
-use oracle::Oracle;
-use rand::{rngs::StdRng, Rng, SeedableRng};
 use types::{
     AcceptInput, AcceptOutput, PrepareInput, PrepareOutput, ProposalNumber, ReplicaId, RequestId,
 };
 
 mod activity_log;
 mod contracts;
+mod in_memory_storage;
 mod oracle;
 mod simulation;
 mod types;
 
 #[derive(Debug)]
 struct Replica {
-    min_proposal_number: ProposalNumber,
+    state: contracts::DurableState,
     next_proposal_number: ProposalNumber,
-    accepted_proposal_number: Option<ProposalNumber>,
-    accepted_value: Option<String>,
 
     config: Config,
     bus: Rc<dyn contracts::MessageBus>,
+    storage: Rc<dyn contracts::Storage>,
 
     inflight_requests: HashMap<RequestId, InflightRequest>,
 }
@@ -43,16 +40,19 @@ struct Config {
 }
 
 impl Replica {
-    fn new(config: Config, bus: Rc<dyn contracts::MessageBus>) -> Self {
-        // In practice, the value would be read from storage.
-        let min_proposal_number = 0;
+    fn new(
+        config: Config,
+        bus: Rc<dyn contracts::MessageBus>,
+        storage: Rc<dyn contracts::Storage>,
+    ) -> Self {
+        let state = storage.load();
+
         Self {
-            min_proposal_number,
-            next_proposal_number: min_proposal_number + 1,
-            accepted_proposal_number: None,
-            accepted_value: None,
+            next_proposal_number: state.min_proposal_number + 1,
+            state,
             config,
             bus,
+            storage,
             inflight_requests: HashMap::new(),
         }
     }
@@ -73,15 +73,20 @@ impl Replica {
     }
 
     fn on_prepare(&mut self, input: PrepareInput) {
-        if input.proposal_number >= self.min_proposal_number {
-            self.min_proposal_number = input.proposal_number;
+        if input.proposal_number > self.state.min_proposal_number {
+            self.state.min_proposal_number = input.proposal_number;
+            self.storage.store(&self.state);
+            eprintln!(
+                "on_prepare: replica={} state={:?} input={:?}",
+                self.config.id, &self.state, &input
+            );
             self.bus.send_prepare_response(
                 input.from_replica_id,
                 PrepareOutput {
                     from_replica_id: self.config.id,
                     request_id: input.request_id,
-                    accepted_proposal_number: self.accepted_proposal_number,
-                    accepted_value: self.accepted_value.clone(),
+                    accepted_proposal_number: self.state.accepted_proposal_number,
+                    accepted_value: self.state.accepted_value.clone(),
                 },
             );
         }
@@ -106,6 +111,11 @@ impl Replica {
                 .map(|response| response.accepted_value.clone().unwrap())
                 .unwrap_or_else(|| req.proposed_value.clone().unwrap());
 
+            eprintln!(
+                "on_prepare_response: replica={} state={:?} responses={:?}",
+                self.config.id, &self.state, &req.responses
+            );
+
             let proposal_number = req.proposal_number;
             self.broadcast_accept(proposal_number, value);
             self.inflight_requests.remove(&request_id);
@@ -113,15 +123,22 @@ impl Replica {
     }
 
     fn on_accept(&mut self, input: AcceptInput) {
-        if input.proposal_number >= self.min_proposal_number {
-            self.accepted_proposal_number = Some(input.proposal_number);
-            self.accepted_value = Some(input.value);
+        if input.proposal_number >= self.state.min_proposal_number {
+            self.state.accepted_proposal_number = Some(input.proposal_number);
+            self.state.accepted_value = Some(input.value.clone());
+            self.storage.store(&self.state);
+
+            eprintln!(
+                "on_accept: replica={} state={:?} input={:?}",
+                self.config.id, &self.state, &input
+            );
+
             self.bus.send_accept_response(
                 input.from_replica_id,
                 AcceptOutput {
                     from_replica_id: self.config.id,
                     request_id: input.request_id,
-                    min_proposal_number: self.min_proposal_number,
+                    min_proposal_number: self.state.min_proposal_number,
                 },
             );
         }
@@ -175,6 +192,11 @@ impl Replica {
             value,
         };
 
+        eprintln!(
+            "broadcast_accept: replica={} state={:?} input={:?}",
+            self.config.id, &self.state, &input
+        );
+
         for i in 0..self.config.replicas.len() {
             let replica_id = self.config.replicas[i];
 
@@ -184,15 +206,3 @@ impl Replica {
 }
 
 fn main() {}
-
-#[cfg(test)]
-mod tests {
-    use quickcheck::quickcheck;
-
-    quickcheck! {
-      #[test]
-      fn sim() -> bool {
-        true
-      }
-    }
-}
