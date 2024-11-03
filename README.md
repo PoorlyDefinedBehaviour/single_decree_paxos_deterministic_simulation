@@ -76,7 +76,7 @@ SEED=6261363621053372974 cargo t action_simulation -- --nocapture > out.txt
 
 Modify `Replica::on_prepare` to accept proposal numbers that are not strictly greater than the min proposal number:
 
-```diff
+```rust
 fn on_prepare(&mut self, input: PrepareInput) {
       - if input.proposal_number > self.min_proposal_number {
       -     ...
@@ -89,7 +89,7 @@ fn on_prepare(&mut self, input: PrepareInput) {
 
 Modify `Replica::on_prepare_response` to not include the value returned by the replica with the greatest proposal number in the next accept request.
 
-```diff
+```rust
     fn on_prepare_response(&mut self, input: PrepareOutput) {
         ...
             -let value = req
@@ -106,7 +106,7 @@ Modify `Replica::on_prepare_response` to not include the value returned by the r
 
 Modify `Replica::on_accept` to stop saving the state to durable storage.
 
-```diff
+```rust
 fn on_accept(&mut self, input: AcceptInput) {
     if input.proposal_number >= self.state.min_proposal_number {
         self.state.accepted_proposal_number = Some(input.proposal_number);
@@ -120,7 +120,7 @@ fn on_accept(&mut self, input: AcceptInput) {
 
 Modify `Replica::on_prepare_response` to mistakenly pick the first accepted value in the set of responses.
 
-```diff
+```rust
 fn on_prepare_response(&mut self, input: PrepareOutput) -> u64 {
   ...
   -let value = ...
