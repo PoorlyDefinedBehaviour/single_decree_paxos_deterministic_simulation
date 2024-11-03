@@ -18,7 +18,7 @@ use crate::{
 struct ActionSimulator {
     config: ActionSimulatorConfig,
     metrics: ActionSimulatorMetrics,
-    action_set: ActionSet,
+    action_set: Vec<Action>,
     rng: Rc<RefCell<StdRng>>,
     bus: Rc<SimMessageBus>,
     replicas: Vec<Replica>,
@@ -26,32 +26,6 @@ struct ActionSimulator {
     activity_log: Rc<RefCell<ActivityLog>>,
     healthy_replicas: HashSet<ReplicaId>,
     failed_replicas: HashSet<ReplicaId>,
-}
-
-#[derive(Debug)]
-struct ActionSet {
-    items: Vec<Action>,
-}
-
-impl ActionSet {
-    fn new() -> Self {
-        Self { items: Vec::new() }
-    }
-
-    fn choose(&self, rng: &mut StdRng) -> (usize, Action) {
-        let i = rng.gen_range(0..self.items.len());
-        (i, self.items[i])
-    }
-
-    fn insert(&mut self, value: Action) {
-        if !self.items.contains(&value) {
-            self.items.push(value);
-        }
-    }
-
-    fn remove_index(&mut self, i: usize) {
-        self.items.swap_remove(i);
-    }
 }
 
 impl UnwindSafe for ActionSimulator {}
@@ -69,9 +43,6 @@ struct ActionSimulatorMetrics {
     num_user_requests_sent: u32,
     num_replica_crashes: u32,
     num_replica_restarts: u32,
-    num_messages_delivered: u32,
-    num_messages_dropped: u32,
-    num_messages_duplicated: u32,
 }
 
 impl ActionSimulatorMetrics {
@@ -80,9 +51,6 @@ impl ActionSimulatorMetrics {
             num_user_requests_sent: 0,
             num_replica_crashes: 0,
             num_replica_restarts: 0,
-            num_messages_delivered: 0,
-            num_messages_dropped: 0,
-            num_messages_duplicated: 0,
         }
     }
 }
@@ -95,6 +63,24 @@ enum Action {
     DeliverMessage,
     DropMessage,
     DuplicateMessage,
+}
+
+impl Action {
+    fn can_be_scheduled(
+        &self,
+        config: &ActionSimulatorConfig,
+        metrics: &ActionSimulatorMetrics,
+        num_messages_in_flight: usize,
+    ) -> bool {
+        match self {
+            Action::SendUserRequest => metrics.num_user_requests_sent < config.max_user_requests,
+            Action::CrashReplica => true,
+            Action::RestartReplica => true,
+            Action::DeliverMessage => num_messages_in_flight > 0,
+            Action::DropMessage => num_messages_in_flight > 0,
+            Action::DuplicateMessage => num_messages_in_flight > 0,
+        }
+    }
 }
 
 impl ActionSimulator {
@@ -110,13 +96,14 @@ impl ActionSimulator {
             config,
             rng,
             bus,
-            action_set: {
-                let mut set = ActionSet::new();
-                set.insert(Action::SendUserRequest);
-                set.insert(Action::CrashReplica);
-                set.insert(Action::RestartReplica);
-                set
-            },
+            action_set: vec![
+                Action::SendUserRequest,
+                Action::CrashReplica,
+                Action::RestartReplica,
+                Action::DeliverMessage,
+                Action::DropMessage,
+                Action::DuplicateMessage,
+            ],
             oracle,
             activity_log,
             healthy_replicas: HashSet::from_iter(replicas.iter().map(|r| r.config.id)),
@@ -130,65 +117,33 @@ impl ActionSimulator {
         self.replicas.len() / 2 + 1
     }
 
-    fn next_action(&mut self, metrics: TODO) {
+    fn next_action(&mut self) -> Action {
         let action = self
             .action_set
-            .filter(|action| action.passes_constraints(&metrics))
-            .choose(rng);
-
-        match action {}
-    }
-
-    fn next_action(&mut self) -> Action {
-        dbg!(&self.action_set);
-        let (i, action) = self.action_set.choose(&mut self.rng.borrow_mut());
+            .iter()
+            .filter(|action| {
+                action.can_be_scheduled(
+                    &self.config,
+                    &self.metrics,
+                    self.bus.num_messages_in_flight(),
+                )
+            })
+            .choose(unsafe { &mut *self.rng.as_ptr() })
+            .cloned()
+            .unwrap();
 
         match action {
             Action::SendUserRequest => {
                 self.metrics.num_user_requests_sent += 1;
-
-                if self.metrics.num_user_requests_sent >= self.config.max_user_requests {
-                    self.action_set.remove_index(i);
-                }
-
-                self.action_set.insert(Action::DeliverMessage);
-                self.action_set.insert(Action::DropMessage);
-                self.action_set.insert(Action::DuplicateMessage);
             }
             Action::CrashReplica => {
                 self.metrics.num_replica_crashes += 1;
-
-                if self.metrics.num_replica_crashes >= self.config.max_replica_crashes {
-                    self.action_set.remove_index(i);
-                }
             }
             Action::RestartReplica => {
                 self.metrics.num_replica_restarts += 1;
-
-                if self.metrics.num_replica_restarts >= self.config.max_replica_restarts {
-                    self.action_set.remove_index(i);
-                }
             }
-            Action::DeliverMessage => {
-                self.metrics.num_messages_delivered += 1;
-
-                if self.metrics.num_messages_delivered >= self.metrics.num_user_requests_sent {
-                    self.action_set.remove_index(i);
-                }
-            }
-            Action::DropMessage => {
-                self.metrics.num_messages_dropped += 1;
-
-                if self.metrics.num_messages_dropped >= self.metrics.num_messages_delivered {
-                    self.action_set.remove_index(i);
-                }
-            }
-            Action::DuplicateMessage => {
-                self.metrics.num_messages_duplicated += 1;
-
-                if self.metrics.num_messages_duplicated >= self.metrics.num_messages_delivered {
-                    self.action_set.remove_index(i);
-                }
+            _ => {
+                // noop.
             }
         }
 
@@ -548,9 +503,7 @@ impl SimMessageBus {
             activity_log,
         }
     }
-}
 
-impl SimMessageBus {
     fn find_replica<'a>(
         &self,
         replicas: &'a mut [Replica],
@@ -568,6 +521,10 @@ impl SimMessageBus {
     fn add_message(&self, message: PendingMessage) {
         let mut queue = self.queue.borrow_mut();
         queue.push(message);
+    }
+
+    fn num_messages_in_flight(&self) -> usize {
+        self.queue.borrow().items.len()
     }
 }
 
@@ -632,7 +589,9 @@ mod tests {
         let count = if std::env::var("SEED").is_ok() {
             1
         } else {
-            std::thread::available_parallelism()?.get()
+            std::env::var("MAX_THREADS")
+                .map(|v| v.parse::<usize>().unwrap())
+                .unwrap_or_else(|_| std::thread::available_parallelism().unwrap().get())
         };
 
         eprintln!("Spawning {count} threads");
@@ -660,6 +619,7 @@ mod tests {
                         if i % 1_000 == 0 {
                             eprintln!("Running simulation {i}");
                         }
+
                         let simulator_config = {
                             let mut rng = rng.borrow_mut();
                             ActionSimulatorConfig {
