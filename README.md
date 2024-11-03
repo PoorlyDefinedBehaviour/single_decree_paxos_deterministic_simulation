@@ -141,3 +141,4 @@ fn on_prepare_response(&mut self, input: PrepareOutput) -> u64 {
 - [x] Delay messages
 - [x] Reorder messages
 - [x] Duplicate messages
+- [] Better action generation. Do not generate actions that don't make sense given the state of the system (e.g. Action::DeliverMessage when no messages were sent)
