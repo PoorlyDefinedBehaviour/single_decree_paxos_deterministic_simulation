@@ -160,7 +160,9 @@ impl ActionSimulator {
 
     fn run(&mut self) {
         for i in 0..self.config.max_actions {
-            match self.next_action() {
+            let action = self.next_action();
+
+            match action {
                 Action::SendUserRequest => {
                     let replica_id = {
                         let replica = self.choose_healthy_replica();
@@ -170,7 +172,6 @@ impl ActionSimulator {
                     self.bus.send_start_proposal(replica_id, value);
                 }
                 Action::CrashReplica => {
-                    continue;
                     if self.healthy_replicas.len() > self.majority() {
                         let replica_id = {
                             let replica = self.choose_healthy_replica();
@@ -184,7 +185,6 @@ impl ActionSimulator {
                     }
                 }
                 Action::RestartReplica => {
-                    continue;
                     let replica_id = {
                         let replica = self.choose_any_replica();
                         replica.config.id
@@ -472,70 +472,98 @@ mod tests {
     use super::*;
     #[test]
     fn action_simulation() -> Result<()> {
-        let seed: u64 = std::env::var("SEED")
-            .map(|v| v.parse::<u64>().unwrap())
-            .unwrap_or_else(|_| rand::thread_rng().gen());
+        let count = if std::env::var("SEED").is_ok() {
+            1
+        } else {
+            std::thread::available_parallelism()?.get()
+        };
 
-        eprintln!("seed={seed}");
+        eprintln!("Spawning {count} threads");
 
-        let rng = Rc::new(RefCell::new(rand::rngs::StdRng::seed_from_u64(seed)));
+        let handles: Vec<_> = (0..count)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    let seed: u64 = std::env::var("SEED")
+                        .map(|v| v.parse::<u64>().unwrap())
+                        .unwrap_or_else(|_| rand::thread_rng().gen());
 
-        for _ in 0..10_000 {
-            eprintln!("-- NEW SIMULATION ---");
-            let simulator_config = {
-                let mut rng = rng.borrow_mut();
-                ActionSimulatorConfig {
-                    max_actions: 1000,
-                    max_user_requests: rng.gen::<u32>() % 100 + 1,
-                    max_replica_crashes: rng.gen::<u32>() % 100,
-                    max_replica_restarts: rng.gen::<u32>() % 100,
-                }
-            };
+                    let iterations = std::env::var("ITERATIONS")
+                        .map(|v| v.parse::<u64>().unwrap())
+                        .unwrap_or_else(|_| 10_000);
 
-            let activity_log = Rc::new(RefCell::new(ActivityLog::new()));
+                    let max_actions = std::env::var("MAX_ACTIONS")
+                        .map(|v| v.parse::<u32>().unwrap())
+                        .unwrap_or_else(|_| 1000);
 
-            let servers = vec![1, 2, 3];
+                    eprintln!("SEED={seed}");
 
-            let majority = servers.len() / 2 + 1;
+                    let rng = Rc::new(RefCell::new(rand::rngs::StdRng::seed_from_u64(seed)));
 
-            let bus: Rc<SimMessageBus> = Rc::new(SimMessageBus::new(
-                Rc::clone(&rng),
-                Oracle::new(majority, Rc::clone(&activity_log)),
-                Rc::clone(&activity_log),
-            ));
+                    for i in 0..iterations {
+                        if i % 1_000 == 0 {
+                            eprintln!("Running simulation {i}");
+                        }
+                        let simulator_config = {
+                            let mut rng = rng.borrow_mut();
+                            ActionSimulatorConfig {
+                                max_actions,
+                                max_user_requests: rng.gen::<u32>() % 100 + 1,
+                                max_replica_crashes: rng.gen::<u32>() % 100,
+                                max_replica_restarts: rng.gen::<u32>() % 100,
+                            }
+                        };
 
-            let replicas: Vec<_> = servers
-                .iter()
-                .map(|id| {
-                    Replica::new(
-                        Config {
-                            id: *id,
-                            replicas: servers.clone(),
-                        },
-                        Rc::clone(&bus) as Rc<dyn contracts::MessageBus>,
-                        Rc::new(InMemoryStorage::new()),
-                    )
+                        let activity_log = Rc::new(RefCell::new(ActivityLog::new()));
+
+                        let servers = vec![1, 2, 3];
+
+                        let majority = servers.len() / 2 + 1;
+
+                        let bus: Rc<SimMessageBus> = Rc::new(SimMessageBus::new(
+                            Rc::clone(&rng),
+                            Oracle::new(majority, Rc::clone(&activity_log)),
+                            Rc::clone(&activity_log),
+                        ));
+
+                        let replicas: Vec<_> = servers
+                            .iter()
+                            .map(|id| {
+                                Replica::new(
+                                    Config {
+                                        id: *id,
+                                        replicas: servers.clone(),
+                                    },
+                                    Rc::clone(&bus) as Rc<dyn contracts::MessageBus>,
+                                    Rc::new(InMemoryStorage::new()),
+                                )
+                            })
+                            .collect();
+
+                        let mut sim = ActionSimulator::new(
+                            simulator_config,
+                            Rc::clone(&rng),
+                            replicas,
+                            Rc::clone(&bus),
+                            Oracle::new(majority, Rc::clone(&activity_log)),
+                            Rc::clone(&activity_log),
+                        );
+
+                        let result = std::panic::catch_unwind(move || {
+                            sim.run();
+                            assert!(sim.bus.queue.borrow().items.is_empty());
+                        });
+                        if result.is_err() {
+                            activity_log.borrow_mut().print_events();
+                            eprintln!("SEED={seed}");
+                            std::process::exit(1);
+                        }
+                    }
                 })
-                .collect();
+            })
+            .collect();
 
-            let mut sim = ActionSimulator::new(
-                simulator_config,
-                Rc::clone(&rng),
-                replicas,
-                Rc::clone(&bus),
-                Oracle::new(majority, Rc::clone(&activity_log)),
-                Rc::clone(&activity_log),
-            );
-
-            let result = std::panic::catch_unwind(move || {
-                sim.run();
-                assert!(sim.bus.queue.borrow().items.is_empty());
-            });
-            if result.is_err() {
-                activity_log.borrow_mut().print_events();
-                eprintln!("seed={seed}");
-                std::process::exit(1);
-            }
+        for handle in handles {
+            handle.join().unwrap();
         }
 
         Ok(())

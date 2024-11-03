@@ -17,7 +17,6 @@ mod types;
 #[derive(Debug)]
 struct Replica {
     state: contracts::DurableState,
-    next_proposal_number: ProposalNumber,
 
     config: Config,
     bus: Rc<dyn contracts::MessageBus>,
@@ -48,7 +47,6 @@ impl Replica {
         let state = storage.load();
 
         Self {
-            next_proposal_number: state.min_proposal_number + 1,
             state,
             config,
             bus,
@@ -62,9 +60,13 @@ impl Replica {
     }
 
     fn next_proposal_number(&mut self) -> u64 {
-        let proposal_number = self.next_proposal_number;
-        self.next_proposal_number += 1;
-        proposal_number
+        let state = contracts::DurableState {
+            min_proposal_number: self.state.min_proposal_number + 1,
+            ..self.state.clone()
+        };
+        self.storage.store(&state);
+        self.state = state;
+        self.state.min_proposal_number
     }
 
     fn on_start_proposal(&mut self, value: String) {
@@ -76,10 +78,7 @@ impl Replica {
         if input.proposal_number > self.state.min_proposal_number {
             self.state.min_proposal_number = input.proposal_number;
             self.storage.store(&self.state);
-            eprintln!(
-                "on_prepare: replica={} state={:?} input={:?}",
-                self.config.id, &self.state, &input
-            );
+
             self.bus.send_prepare_response(
                 input.from_replica_id,
                 PrepareOutput {
@@ -111,11 +110,6 @@ impl Replica {
                 .map(|response| response.accepted_value.clone().unwrap())
                 .unwrap_or_else(|| req.proposed_value.clone().unwrap());
 
-            eprintln!(
-                "on_prepare_response: replica={} state={:?} responses={:?}",
-                self.config.id, &self.state, &req.responses
-            );
-
             let proposal_number = req.proposal_number;
             self.broadcast_accept(proposal_number, value);
             self.inflight_requests.remove(&request_id);
@@ -127,11 +121,6 @@ impl Replica {
             self.state.accepted_proposal_number = Some(input.proposal_number);
             self.state.accepted_value = Some(input.value.clone());
             self.storage.store(&self.state);
-
-            eprintln!(
-                "on_accept: replica={} state={:?} input={:?}",
-                self.config.id, &self.state, &input
-            );
 
             self.bus.send_accept_response(
                 input.from_replica_id,
@@ -191,11 +180,6 @@ impl Replica {
             proposal_number,
             value,
         };
-
-        eprintln!(
-            "broadcast_accept: replica={} state={:?} input={:?}",
-            self.config.id, &self.state, &input
-        );
 
         for i in 0..self.config.replicas.len() {
             let replica_id = self.config.replicas[i];
