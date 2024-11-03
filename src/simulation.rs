@@ -18,6 +18,7 @@ use crate::{
 struct ActionSimulator {
     config: ActionSimulatorConfig,
     metrics: ActionSimulatorMetrics,
+    action_set: Vec<Action>,
     rng: Rc<RefCell<StdRng>>,
     bus: Rc<SimMessageBus>,
     replicas: Vec<Replica>,
@@ -54,7 +55,7 @@ impl ActionSimulatorMetrics {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 enum Action {
     SendUserRequest,
     CrashReplica,
@@ -77,6 +78,11 @@ impl ActionSimulator {
             config,
             rng,
             bus,
+            action_set: vec![
+                Action::SendUserRequest,
+                Action::CrashReplica,
+                Action::RestartReplica,
+            ],
             oracle,
             activity_log,
             healthy_replicas: HashSet::from_iter(replicas.iter().map(|r| r.config.id)),
@@ -92,7 +98,23 @@ impl ActionSimulator {
 
     fn next_action(&mut self) -> Action {
         loop {
-            let n: u8 = self.rng.borrow_mut().gen::<u8>() % 6;
+            let i = self.rng.borrow_mut().gen_range(0..self.action_set.len());
+            let action = self.action_set[i];
+
+            match action {
+                Action::SendUserRequest => {
+                    if self.metrics.num_user_requests_sent >= self.config.max_user_requests {
+                        let _ = self.action_set.swap_remove(i);
+                    }
+                    self.metrics.num_user_requests_sent += 1;
+                    return Action::SendUserRequest;
+                }
+                Action::CrashReplica => todo!(),
+                Action::RestartReplica => todo!(),
+                Action::DeliverMessage => todo!(),
+                Action::DropMessage => todo!(),
+                Action::DuplicateMessage => todo!(),
+            }
             match n {
                 0 => {
                     if self.metrics.num_user_requests_sent < self.config.max_user_requests {
