@@ -30,7 +30,7 @@ pub struct PrepareInput {
     pub proposal_number: ProposalNumber,
 }
 
-#[derive(Debug, Hash, PartialEq, Eq)]
+#[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub struct PrepareOutput {
     pub from_replica_id: ReplicaId,
     pub request_id: RequestId,

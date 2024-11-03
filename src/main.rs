@@ -15,7 +15,7 @@ mod simulation;
 mod types;
 
 #[derive(Debug)]
-struct Replica {
+pub struct Replica {
     state: contracts::DurableState,
 
     config: Config,
@@ -26,14 +26,14 @@ struct Replica {
 }
 
 #[derive(Debug)]
-struct InflightRequest {
+pub struct InflightRequest {
     proposal_number: ProposalNumber,
     proposed_value: Option<String>,
     responses: HashSet<PrepareOutput>,
 }
 
 #[derive(Debug)]
-struct Config {
+pub struct Config {
     id: ReplicaId,
     replicas: Vec<ReplicaId>,
 }

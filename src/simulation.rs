@@ -60,6 +60,8 @@ enum Action {
     CrashReplica,
     RestartReplica,
     DeliverMessage,
+    DropMessage,
+    DuplicateMessage,
 }
 
 impl ActionSimulator {
@@ -90,7 +92,7 @@ impl ActionSimulator {
 
     fn next_action(&mut self) -> Action {
         loop {
-            let n: u8 = self.rng.borrow_mut().gen::<u8>() % 4;
+            let n: u8 = self.rng.borrow_mut().gen::<u8>() % 6;
             match n {
                 0 => {
                     if self.metrics.num_user_requests_sent < self.config.max_user_requests {
@@ -111,7 +113,11 @@ impl ActionSimulator {
                     }
                 }
                 3 => return Action::DeliverMessage,
-                _ => unreachable!(),
+                4 => return Action::DropMessage,
+                5 => return Action::DuplicateMessage,
+                _ => unreachable!(
+                    "ensure you have the correct number of actions in the match expression"
+                ),
             }
         }
     }
@@ -195,6 +201,22 @@ impl ActionSimulator {
                     self.activity_log
                         .borrow_mut()
                         .record(format!("[SIMULATOR] RESTART Replica({replica_id})"));
+                }
+                Action::DropMessage => {
+                    if let Some(message) = self.bus.next_message() {
+                        self.activity_log
+                            .borrow_mut()
+                            .record(message.to_activity_log_event(EventType::Drop));
+                    }
+                }
+                Action::DuplicateMessage => {
+                    if let Some(message) = self.bus.next_message() {
+                        self.activity_log
+                            .borrow_mut()
+                            .record(message.to_activity_log_event(EventType::Duplicate));
+                        self.bus.add_message(message.clone());
+                        self.bus.add_message(message);
+                    }
                 }
                 Action::DeliverMessage => {
                     if let Some(message) = self.bus.next_message() {
@@ -284,7 +306,7 @@ impl MessageQueue {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum PendingMessage {
     StartProposal(ReplicaId, String),
     Prepare(ReplicaId, PrepareInput),
@@ -297,6 +319,8 @@ pub enum PendingMessage {
 enum EventType {
     Queue,
     Receive,
+    Drop,
+    Duplicate,
 }
 
 impl PendingMessage {
@@ -320,8 +344,15 @@ impl PendingMessage {
                     "[BUS] Simulator -> Replica({}) RECEIVED StartProposal({})",
                     to_replica_id, value
                 ),
+                EventType::Drop => format!(
+                    "[SIMULATOR] DROP Simulator -> Replica({}) RECEIVED StartProposal({})",
+                    to_replica_id, value
+                ),
+                EventType::Duplicate => format!(
+                  "[SIMULATOR] DUPLICATE Simulator -> Replica({}) RECEIVED StartProposal({})",
+                  to_replica_id, value
+              ),
             },
-
             PendingMessage::Prepare(to_replica_id, msg) => match event_type {
                 EventType::Queue => format!(
                     "[BUS] Replica({}) -> Replica({}) QUEUED Prepare({})",
@@ -331,6 +362,14 @@ impl PendingMessage {
                     "[BUS] Replica({}) -> Replica({}) RECEIVED Prepare({})",
                     msg.from_replica_id, to_replica_id, msg.request_id,
                 ),
+                EventType::Drop => format!(
+                    "[SIMULATOR] DROP Replica({}) -> Replica({}) Prepare({})",
+                    msg.from_replica_id, to_replica_id, msg.request_id,
+                ),
+                EventType::Duplicate => format!(
+                  "[SIMULATOR] DUPLICATE Replica({}) -> Replica({}) Prepare({})",
+                  msg.from_replica_id, to_replica_id, msg.request_id,
+              ),
             },
 
             PendingMessage::PrepareResponse(to_replica_id, msg) => match event_type {
@@ -350,6 +389,22 @@ impl PendingMessage {
                     msg.accepted_proposal_number,
                     msg.accepted_value,
                 ),
+                EventType::Drop => format!(
+                    "[SIMULATOR] DROP Replica({}) -> Replica({}) PrepareResponse({}, {:?}, {:?})",
+                    msg.from_replica_id,
+                    to_replica_id,
+                    msg.request_id,
+                    msg.accepted_proposal_number,
+                    msg.accepted_value,
+                ),
+                EventType::Duplicate => format!(
+                  "[SIMULATOR] DUPLICATE Replica({}) -> Replica({}) PrepareResponse({}, {:?}, {:?})",
+                  msg.from_replica_id,
+                  to_replica_id,
+                  msg.request_id,
+                  msg.accepted_proposal_number,
+                  msg.accepted_value,
+              ),
             },
             PendingMessage::Accept(to_replica_id, msg) => match event_type {
                 EventType::Queue => format!(
@@ -368,6 +423,22 @@ impl PendingMessage {
                     msg.proposal_number,
                     msg.value,
                 ),
+                EventType::Drop => format!(
+                    "[SIMULATOR] DROP Replica({}) -> Replica({}) Accept({}, {}, {})",
+                    msg.from_replica_id,
+                    to_replica_id,
+                    msg.request_id,
+                    msg.proposal_number,
+                    msg.value,
+                ),
+                EventType::Duplicate => format!(
+                  "[SIMULATOR] DUPLICATE Replica({}) -> Replica({}) Accept({}, {}, {})",
+                  msg.from_replica_id,
+                  to_replica_id,
+                  msg.request_id,
+                  msg.proposal_number,
+                  msg.value,
+              ),
             },
             PendingMessage::AcceptResponse(to_replica_id, msg) => match event_type {
                 EventType::Queue => format!(
@@ -378,6 +449,14 @@ impl PendingMessage {
                     "[BUS] Replica({}) -> Replica({}) RECEIVED AcceptResponse({}, {})",
                     msg.from_replica_id, to_replica_id, msg.request_id, msg.min_proposal_number,
                 ),
+                EventType::Drop => format!(
+                    "[SIMULATOR] DROP Replica({}) -> Replica({}) AcceptResponse({}, {})",
+                    msg.from_replica_id, to_replica_id, msg.request_id, msg.min_proposal_number,
+                ),
+                EventType::Duplicate => format!(
+                  "[SIMULATOR] DUPLICATE Replica({}) -> Replica({}) AcceptResponse({}, {})",
+                  msg.from_replica_id, to_replica_id, msg.request_id, msg.min_proposal_number,
+              ),
             },
         }
     }
@@ -411,6 +490,11 @@ impl SimMessageBus {
         let message = self.queue.borrow_mut().pop()?;
 
         Some(message)
+    }
+
+    fn add_message(&self, message: PendingMessage) {
+        let mut queue = self.queue.borrow_mut();
+        queue.push(message);
     }
 }
 
@@ -487,7 +571,7 @@ mod tests {
                         .map(|v| v.parse::<u64>().unwrap())
                         .unwrap_or_else(|_| rand::thread_rng().gen());
 
-                    let iterations = std::env::var("ITERATIONS")
+                    let max_iters = std::env::var("MAX_ITERS")
                         .map(|v| v.parse::<u64>().unwrap())
                         .unwrap_or_else(|_| 10_000);
 
@@ -499,7 +583,7 @@ mod tests {
 
                     let rng = Rc::new(RefCell::new(rand::rngs::StdRng::seed_from_u64(seed)));
 
-                    for i in 0..iterations {
+                    for i in 0..max_iters {
                         if i % 1_000 == 0 {
                             eprintln!("Running simulation {i}");
                         }

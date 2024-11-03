@@ -136,8 +136,8 @@ fn on_prepare_response(&mut self, input: PrepareOutput) -> u64 {
 
 ## TODO
 
-- Activity log like P-Lang has.
-- Drop messages
-- Delay messages
-- Reorder messages
-- Duplicate messages
+- [x] Activity log like P-Lang has.
+- [x] Drop messages
+- [x] Delay messages
+- [x] Reorder messages
+- [x] Duplicate messages

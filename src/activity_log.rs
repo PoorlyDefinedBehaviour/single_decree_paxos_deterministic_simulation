@@ -10,9 +10,6 @@ impl ActivityLog {
 
     pub fn record(&mut self, event: String) {
         self.buffer.push(event);
-        // if self.buffer.len() >= 64 {
-        //     self.print_events();
-        // }
     }
 
     pub fn print_events(&mut self) {
