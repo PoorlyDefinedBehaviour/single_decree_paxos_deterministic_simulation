@@ -18,7 +18,7 @@ use crate::{
 struct ActionSimulator {
     config: ActionSimulatorConfig,
     metrics: ActionSimulatorMetrics,
-    action_set: Vec<Action>,
+    action_set: ActionSet,
     rng: Rc<RefCell<StdRng>>,
     bus: Rc<SimMessageBus>,
     replicas: Vec<Replica>,
@@ -26,6 +26,32 @@ struct ActionSimulator {
     activity_log: Rc<RefCell<ActivityLog>>,
     healthy_replicas: HashSet<ReplicaId>,
     failed_replicas: HashSet<ReplicaId>,
+}
+
+#[derive(Debug)]
+struct ActionSet {
+    items: Vec<Action>,
+}
+
+impl ActionSet {
+    fn new() -> Self {
+        Self { items: Vec::new() }
+    }
+
+    fn choose(&self, rng: &mut StdRng) -> (usize, Action) {
+        let i = rng.gen_range(0..self.items.len());
+        (i, self.items[i])
+    }
+
+    fn insert(&mut self, value: Action) {
+        if !self.items.contains(&value) {
+            self.items.push(value);
+        }
+    }
+
+    fn remove_index(&mut self, i: usize) {
+        self.items.swap_remove(i);
+    }
 }
 
 impl UnwindSafe for ActionSimulator {}
@@ -43,6 +69,9 @@ struct ActionSimulatorMetrics {
     num_user_requests_sent: u32,
     num_replica_crashes: u32,
     num_replica_restarts: u32,
+    num_messages_delivered: u32,
+    num_messages_dropped: u32,
+    num_messages_duplicated: u32,
 }
 
 impl ActionSimulatorMetrics {
@@ -51,11 +80,14 @@ impl ActionSimulatorMetrics {
             num_user_requests_sent: 0,
             num_replica_crashes: 0,
             num_replica_restarts: 0,
+            num_messages_delivered: 0,
+            num_messages_dropped: 0,
+            num_messages_duplicated: 0,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 enum Action {
     SendUserRequest,
     CrashReplica,
@@ -78,11 +110,13 @@ impl ActionSimulator {
             config,
             rng,
             bus,
-            action_set: vec![
-                Action::SendUserRequest,
-                Action::CrashReplica,
-                Action::RestartReplica,
-            ],
+            action_set: {
+                let mut set = ActionSet::new();
+                set.insert(Action::SendUserRequest);
+                set.insert(Action::CrashReplica);
+                set.insert(Action::RestartReplica);
+                set
+            },
             oracle,
             activity_log,
             healthy_replicas: HashSet::from_iter(replicas.iter().map(|r| r.config.id)),
@@ -96,52 +130,69 @@ impl ActionSimulator {
         self.replicas.len() / 2 + 1
     }
 
-    fn next_action(&mut self) -> Action {
-        loop {
-            let i = self.rng.borrow_mut().gen_range(0..self.action_set.len());
-            let action = self.action_set[i];
+    fn next_action(&mut self, metrics: TODO) {
+        let action = self
+            .action_set
+            .filter(|action| action.passes_constraints(&metrics))
+            .choose(rng);
 
-            match action {
-                Action::SendUserRequest => {
-                    if self.metrics.num_user_requests_sent >= self.config.max_user_requests {
-                        let _ = self.action_set.swap_remove(i);
-                    }
-                    self.metrics.num_user_requests_sent += 1;
-                    return Action::SendUserRequest;
+        match action {}
+    }
+
+    fn next_action(&mut self) -> Action {
+        dbg!(&self.action_set);
+        let (i, action) = self.action_set.choose(&mut self.rng.borrow_mut());
+
+        match action {
+            Action::SendUserRequest => {
+                self.metrics.num_user_requests_sent += 1;
+
+                if self.metrics.num_user_requests_sent >= self.config.max_user_requests {
+                    self.action_set.remove_index(i);
                 }
-                Action::CrashReplica => todo!(),
-                Action::RestartReplica => todo!(),
-                Action::DeliverMessage => todo!(),
-                Action::DropMessage => todo!(),
-                Action::DuplicateMessage => todo!(),
+
+                self.action_set.insert(Action::DeliverMessage);
+                self.action_set.insert(Action::DropMessage);
+                self.action_set.insert(Action::DuplicateMessage);
             }
-            match n {
-                0 => {
-                    if self.metrics.num_user_requests_sent < self.config.max_user_requests {
-                        self.metrics.num_user_requests_sent += 1;
-                        return Action::SendUserRequest;
-                    }
+            Action::CrashReplica => {
+                self.metrics.num_replica_crashes += 1;
+
+                if self.metrics.num_replica_crashes >= self.config.max_replica_crashes {
+                    self.action_set.remove_index(i);
                 }
-                1 => {
-                    if self.metrics.num_replica_crashes < self.config.max_replica_crashes {
-                        self.metrics.num_replica_crashes += 1;
-                        return Action::CrashReplica;
-                    }
+            }
+            Action::RestartReplica => {
+                self.metrics.num_replica_restarts += 1;
+
+                if self.metrics.num_replica_restarts >= self.config.max_replica_restarts {
+                    self.action_set.remove_index(i);
                 }
-                2 => {
-                    if self.metrics.num_replica_restarts < self.config.max_replica_restarts {
-                        self.metrics.num_replica_restarts += 1;
-                        return Action::RestartReplica;
-                    }
+            }
+            Action::DeliverMessage => {
+                self.metrics.num_messages_delivered += 1;
+
+                if self.metrics.num_messages_delivered >= self.metrics.num_user_requests_sent {
+                    self.action_set.remove_index(i);
                 }
-                3 => return Action::DeliverMessage,
-                4 => return Action::DropMessage,
-                5 => return Action::DuplicateMessage,
-                _ => unreachable!(
-                    "ensure you have the correct number of actions in the match expression"
-                ),
+            }
+            Action::DropMessage => {
+                self.metrics.num_messages_dropped += 1;
+
+                if self.metrics.num_messages_dropped >= self.metrics.num_messages_delivered {
+                    self.action_set.remove_index(i);
+                }
+            }
+            Action::DuplicateMessage => {
+                self.metrics.num_messages_duplicated += 1;
+
+                if self.metrics.num_messages_duplicated >= self.metrics.num_messages_delivered {
+                    self.action_set.remove_index(i);
+                }
             }
         }
+
+        action
     }
 
     fn choose_healthy_replica(&mut self) -> &Replica {
