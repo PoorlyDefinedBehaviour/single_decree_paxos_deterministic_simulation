@@ -540,37 +540,37 @@ impl contracts::MessageBus for SimMessageBus {
 
     fn send_prepare(&self, to_replica_id: ReplicaId, input: PrepareInput) {
         let message = PendingMessage::Prepare(to_replica_id, input);
-        // self.activity_log
-        //     .as_ref()
-        //     .borrow_mut()
-        //     .record(message.to_activity_log_event(EventType::Queue));
+        self.activity_log
+            .as_ref()
+            .borrow_mut()
+            .record(message.to_activity_log_event(EventType::Queue));
         self.queue.borrow_mut().push(message);
     }
 
     fn send_prepare_response(&self, to_replica_id: ReplicaId, input: PrepareOutput) {
         let message = PendingMessage::PrepareResponse(to_replica_id, input);
-        // self.activity_log
-        //     .as_ref()
-        //     .borrow_mut()
-        //     .record(message.to_activity_log_event(EventType::Queue));
+        self.activity_log
+            .as_ref()
+            .borrow_mut()
+            .record(message.to_activity_log_event(EventType::Queue));
         self.queue.borrow_mut().push(message);
     }
 
     fn send_accept(&self, to_replica_id: ReplicaId, input: AcceptInput) {
         let message = PendingMessage::Accept(to_replica_id, input);
-        // self.activity_log
-        //     .as_ref()
-        //     .borrow_mut()
-        //     .record(message.to_activity_log_event(EventType::Queue));
+        self.activity_log
+            .as_ref()
+            .borrow_mut()
+            .record(message.to_activity_log_event(EventType::Queue));
         self.queue.borrow_mut().push(message);
     }
 
     fn send_accept_response(&self, to_replica_id: ReplicaId, input: AcceptOutput) {
         let message = PendingMessage::AcceptResponse(to_replica_id, input);
-        // self.activity_log
-        //     .as_ref()
-        //     .borrow_mut()
-        //     .record(message.to_activity_log_event(EventType::Queue));
+        self.activity_log
+            .as_ref()
+            .borrow_mut()
+            .record(message.to_activity_log_event(EventType::Queue));
         self.queue.borrow_mut().push(message);
     }
 }
