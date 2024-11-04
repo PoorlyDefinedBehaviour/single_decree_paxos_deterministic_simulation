@@ -141,3 +141,4 @@ fn on_prepare_response(&mut self, input: PrepareOutput) -> u64 {
 - [x] Duplicate messages
 - [x] Better action generation. Do not generate actions that don't make sense given the state of the system (e.g. Action::DeliverMessage when no messages were sent)
 - Inject IO (e.g. filesystem) errors
+- Remove .unwrap() calls
