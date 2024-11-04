@@ -3,6 +3,7 @@ use std::{
     rc::Rc,
 };
 
+use anyhow::Result;
 use types::{
     AcceptInput, AcceptOutput, PrepareInput, PrepareOutput, ProposalNumber, ReplicaId, RequestId,
 };
@@ -60,25 +61,25 @@ impl Replica {
         self.config.replicas.len() / 2 + 1
     }
 
-    fn next_proposal_number(&mut self) -> u64 {
+    fn next_proposal_number(&mut self) -> Result<u64> {
         let state = contracts::DurableState {
             min_proposal_number: self.state.min_proposal_number + 1,
             ..self.state.clone()
         };
-        self.storage.store(&state);
+        self.storage.store(&state)?;
         self.state = state;
-        self.state.min_proposal_number
+        Ok(self.state.min_proposal_number)
     }
 
     fn on_start_proposal(&mut self, value: String) {
-        let proposal_number = self.next_proposal_number();
+        let proposal_number = self.next_proposal_number().unwrap();
         self.broadcast_prepare(proposal_number, value);
     }
 
     fn on_prepare(&mut self, input: PrepareInput) {
-        if input.proposal_number > self.state.min_proposal_number {
+        if input.proposal_number >= self.state.min_proposal_number {
             self.state.min_proposal_number = input.proposal_number;
-            self.storage.store(&self.state);
+            self.storage.store(&self.state).unwrap();
 
             self.bus.send_prepare_response(
                 input.from_replica_id,
@@ -121,7 +122,7 @@ impl Replica {
         if input.proposal_number >= self.state.min_proposal_number {
             self.state.accepted_proposal_number = Some(input.proposal_number);
             self.state.accepted_value = Some(input.value.clone());
-            self.storage.store(&self.state);
+            self.storage.store(&self.state).unwrap();
 
             self.bus.send_accept_response(
                 input.from_replica_id,
