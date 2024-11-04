@@ -9,6 +9,7 @@ use types::{
 
 mod activity_log;
 mod contracts;
+mod file_storage;
 mod in_memory_storage;
 mod oracle;
 mod simulation;

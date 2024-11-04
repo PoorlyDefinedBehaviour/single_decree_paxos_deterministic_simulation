@@ -2,7 +2,7 @@ use crate::types::{
     AcceptInput, AcceptOutput, PrepareInput, PrepareOutput, ProposalNumber, ReplicaId,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
 pub struct DurableState {
     pub min_proposal_number: ProposalNumber,
     pub accepted_proposal_number: Option<ProposalNumber>,
@@ -21,5 +21,5 @@ pub trait MessageBus: std::fmt::Debug {
 
 pub trait Storage: std::fmt::Debug {
     fn load(&self) -> DurableState;
-    fn store(&self, state: &DurableState);
+    fn store(&self, state: &DurableState) -> std::io::Result<()>;
 }

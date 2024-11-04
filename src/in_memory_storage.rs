@@ -1,6 +1,5 @@
-use std::cell::RefCell;
-
 use crate::contracts;
+use std::cell::RefCell;
 
 #[derive(Debug)]
 pub struct InMemoryStorage {
@@ -27,7 +26,8 @@ impl contracts::Storage for InMemoryStorage {
             })
     }
 
-    fn store(&self, state: &contracts::DurableState) {
+    fn store(&self, state: &contracts::DurableState) -> std::io::Result<()> {
         *self.state.borrow_mut() = Some(state.clone());
+        Ok(())
     }
 }
