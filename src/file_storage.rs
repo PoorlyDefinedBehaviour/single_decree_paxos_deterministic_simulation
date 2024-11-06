@@ -23,6 +23,7 @@ impl std::fmt::Debug for FileStorage {
 
 impl FileStorage {
     pub fn new(dir: PathBuf) -> Result<Self> {
+        // TODO: fsync dir.
         std::fs::create_dir_all(&dir)?;
 
         let path = dir.join("paxos.state");
@@ -81,6 +82,7 @@ impl contracts::Storage for FileStorage {
         file.write_all(serde_json::to_string(state).unwrap().as_ref())?;
         file.flush()?;
         std::fs::rename(temp_file_path, final_file_path)?;
+        // TODO: need to fsync dir?
         *self.state.borrow_mut() = Some(state.to_owned());
         *self.file.borrow_mut() = file;
         Ok(())
