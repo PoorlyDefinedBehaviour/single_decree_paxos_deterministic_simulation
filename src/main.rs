@@ -77,7 +77,7 @@ impl Replica {
     }
 
     fn on_prepare(&mut self, input: PrepareInput) {
-        if input.proposal_number >= self.state.min_proposal_number {
+        if input.proposal_number > self.state.min_proposal_number {
             self.state.min_proposal_number = input.proposal_number;
             self.storage.store(&self.state).unwrap();
 
