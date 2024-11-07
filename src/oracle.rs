@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     activity_log::ActivityLog,
-    types::{AcceptInput, AcceptOutput, PrepareOutput, ReplicaId, RequestId},
+    types::{AcceptInput, AcceptOutput,  ReplicaId, RequestId},
 };
 
 #[derive(Debug)]
@@ -43,14 +43,14 @@ impl Oracle {
         }
     }
 
-    pub fn on_accept_sent(&mut self, to_replica_id: ReplicaId, input: &AcceptInput) {
+    pub fn on_accept_sent(&mut self, _to_replica_id: ReplicaId, input: &AcceptInput) {
         self.inflight_accept_requests.insert(
             input.request_id,
             InflightAcceptRequest::new(input.value.clone()),
         );
     }
 
-    pub fn on_proposal_accepted(&mut self, to_replica_id: ReplicaId, output: &AcceptOutput) {
+    pub fn on_proposal_accepted(&mut self, _to_replica_id: ReplicaId, output: &AcceptOutput) {
         if let Some(req) = self.inflight_accept_requests.get_mut(&output.request_id) {
             req.responses.insert(output.to_owned());
             if req.responses.len() < self.majority {

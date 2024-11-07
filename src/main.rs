@@ -78,8 +78,10 @@ impl Replica {
 
     fn on_prepare(&mut self, input: PrepareInput) {
         if input.proposal_number > self.state.min_proposal_number {
-            self.state.min_proposal_number = input.proposal_number;
-            self.storage.store(&self.state).unwrap();
+            let mut state = self.state.clone();
+            state.min_proposal_number = input.proposal_number;
+            self.storage.store(&state).unwrap();
+            self.state = state;
 
             self.bus.send_prepare_response(
                 input.from_replica_id,
@@ -120,9 +122,11 @@ impl Replica {
 
     fn on_accept(&mut self, input: AcceptInput) {
         if input.proposal_number >= self.state.min_proposal_number {
-            self.state.accepted_proposal_number = Some(input.proposal_number);
-            self.state.accepted_value = Some(input.value);
-            self.storage.store(&self.state).unwrap();
+            let mut state = self.state.clone();
+            state.accepted_proposal_number = Some(input.proposal_number);
+            state.accepted_value = Some(input.value);
+            self.storage.store(&state).unwrap();
+            self.state = state;
 
             self.bus.send_accept_response(
                 input.from_replica_id,

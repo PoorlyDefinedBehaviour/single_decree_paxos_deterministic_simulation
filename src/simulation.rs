@@ -282,11 +282,9 @@ impl ActionSimulator {
                 replica.on_prepare_response(input);
             }
             PendingMessage::Accept(to_replica_id, input) => {
-                self.oracle.on_accept_sent(to_replica_id, &input);
                 replica.on_accept(input);
             }
             PendingMessage::AcceptResponse(to_replica_id, input) => {
-                self.oracle.on_proposal_accepted(to_replica_id, &input);
                 replica.on_accept_response(input);
             }
         }
@@ -329,7 +327,7 @@ impl MessageQueue {
             .as_ref()
             .borrow_mut()
             .gen_range(0..self.items.len());
-        let item = self.items.remove(i);
+        let item = self.items.swap_remove(i);
         Some(item)
     }
 }
@@ -514,7 +512,23 @@ impl SimMessageBus {
 
     fn next_message(&self) -> Option<PendingMessage> {
         let message = self.queue.borrow_mut().pop()?;
-
+        match &message {
+            PendingMessage::Accept(to_replica_id, input) => {
+                self.oracle
+                    .borrow_mut()
+                    .on_accept_sent(*to_replica_id, input);
+            }
+            PendingMessage::AcceptResponse(to_replica_id, input) => {
+                self.oracle
+                    .borrow_mut()
+                    .on_proposal_accepted(*to_replica_id, input);
+            }
+            PendingMessage::StartProposal(_, _)
+            | PendingMessage::Prepare(_, _)
+            | PendingMessage::PrepareResponse(_, _) => {
+                // no-op.
+            }
+        }
         Some(message)
     }
 
