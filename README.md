@@ -107,10 +107,11 @@ Modify `Replica::on_accept` to stop saving the state to durable storage.
 ```rust
 fn on_accept(&mut self, input: AcceptInput) {
     if input.proposal_number >= self.state.min_proposal_number {
-        self.state.accepted_proposal_number = Some(input.proposal_number);
-        self.state.accepted_value = Some(input.value);
-        -self.storage.store(&self.state);
-        +// self.storage.store(&self.state);
+        let mut state = self.state.clone();
+        state.accepted_proposal_number = Some(input.proposal_number);
+        state.accepted_value = Some(input.value);
+        self.storage.store(&state).unwrap();
+        self.state = state;
       ...
     }
 }

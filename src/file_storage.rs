@@ -1,15 +1,11 @@
-use crate::contracts;
+use crate::contracts::{self, FileSystem};
 use anyhow::Result;
-use std::{
-    cell::RefCell,
-    fs::{File, OpenOptions},
-    io::{Read, Write},
-    path::PathBuf,
-};
+use std::{cell::RefCell, fs::OpenOptions, io::Write, path::PathBuf, rc::Rc};
 
 pub struct FileStorage {
+    fs: Rc<dyn contracts::FileSystem>,
     dir: PathBuf,
-    file: RefCell<File>,
+    file: RefCell<Box<dyn contracts::File>>,
     state: RefCell<Option<contracts::DurableState>>,
 }
 
@@ -22,13 +18,13 @@ impl std::fmt::Debug for FileStorage {
 }
 
 impl FileStorage {
-    pub fn new(dir: PathBuf) -> Result<Self> {
+    pub fn new(fs: Rc<dyn contracts::FileSystem>, dir: PathBuf) -> Result<Self> {
         // TODO: fsync dir.
-        std::fs::create_dir_all(&dir)?;
+        fs.create_dir_all(&dir)?;
 
         let path = dir.join("paxos.state");
 
-        let mut file = create_or_open_file(&path)?;
+        let mut file = create_or_open_file(fs.as_ref(), &path)?;
 
         let state = if file.metadata()?.len() == 0 {
             None
@@ -39,6 +35,7 @@ impl FileStorage {
         };
 
         Ok(Self {
+            fs,
             dir,
             file: RefCell::new(file),
             state: RefCell::new(state),
@@ -46,21 +43,34 @@ impl FileStorage {
     }
 }
 
-fn create_or_open_file(path: &PathBuf) -> std::io::Result<File> {
-    OpenOptions::new()
-        .create(true)
-        .write(true)
-        .read(true)
-        .open(path)
+fn create_or_open_file(
+    fs: &dyn contracts::FileSystem,
+    path: &PathBuf,
+) -> std::io::Result<Box<dyn contracts::File>> {
+    fs.open(
+        path,
+        contracts::OpenOptions {
+            create: true,
+            read: true,
+            write: true,
+            truncate: false,
+        },
+    )
 }
 
-fn create_or_truncate_file(path: &PathBuf) -> std::io::Result<File> {
-    OpenOptions::new()
-        .create(true)
-        .write(true)
-        .read(true)
-        .truncate(true)
-        .open(path)
+fn create_or_truncate_file(
+    fs: &dyn contracts::FileSystem,
+    path: &PathBuf,
+) -> std::io::Result<Box<dyn contracts::File>> {
+    fs.open(
+        path,
+        contracts::OpenOptions {
+            create: true,
+            read: true,
+            write: true,
+            truncate: true,
+        },
+    )
 }
 
 impl contracts::Storage for FileStorage {
@@ -78,7 +88,7 @@ impl contracts::Storage for FileStorage {
     fn store(&self, state: &contracts::DurableState) -> std::io::Result<()> {
         let temp_file_path = self.dir.join("paxos.state.temp");
         let final_file_path = self.dir.join("paxos.state");
-        let mut file = create_or_truncate_file(&temp_file_path)?;
+        let mut file = create_or_truncate_file(self.fs.as_ref(), &temp_file_path)?;
         file.write_all(serde_json::to_string(state).unwrap().as_ref())?;
         file.flush()?;
         std::fs::rename(temp_file_path, final_file_path)?;
@@ -86,6 +96,40 @@ impl contracts::Storage for FileStorage {
         *self.state.borrow_mut() = Some(state.to_owned());
         *self.file.borrow_mut() = file;
         Ok(())
+    }
+}
+
+struct Fs {}
+
+impl Fs {
+    fn new() -> Self {
+        Self {}
+    }
+}
+
+impl contracts::FileSystem for Fs {
+    fn create_dir_all(&self, path: &std::path::Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(path)
+    }
+
+    fn open(
+        &self,
+        path: &std::path::Path,
+        options: contracts::OpenOptions,
+    ) -> std::io::Result<Box<dyn contracts::File>> {
+        let file = OpenOptions::new()
+            .create(options.create)
+            .read(options.read)
+            .write(options.write)
+            .open(path)?;
+        Ok(Box::new(file))
+    }
+}
+
+impl contracts::File for std::fs::File {
+    fn metadata(&self) -> std::io::Result<contracts::Metadata> {
+        self.metadata()
+            .map(|m| contracts::Metadata { len: m.len() })
     }
 }
 
@@ -125,13 +169,13 @@ mod tests {
       #[test]
       fn basic(ops: Vec<Op>) -> bool {
         let dir = std::env::temp_dir().join(Uuid::new_v4().to_string());
-        let mut storage = FileStorage::new(dir.clone()).unwrap();
+        let mut storage = FileStorage::new(Rc::new(Fs::new()), dir.clone()).unwrap();
         let model = InMemoryStorage::new();
 
         for op in ops {
           match op {
             Op::New => {
-              storage = FileStorage::new(dir.clone()).unwrap();
+              storage = FileStorage::new(Rc::new(Fs::new()), dir.clone()).unwrap();
             }
               Op::Load => {
                 assert_eq!(model.load(), storage.load());

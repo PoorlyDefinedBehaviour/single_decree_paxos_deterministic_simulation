@@ -1,3 +1,5 @@
+#![feature(io_error_uncategorized)]
+
 use std::{
     collections::{HashMap, HashSet},
     rc::Rc,

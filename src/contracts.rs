@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use crate::types::{
     AcceptInput, AcceptOutput, PrepareInput, PrepareOutput, ProposalNumber, ReplicaId,
 };
@@ -22,4 +24,32 @@ pub trait MessageBus: std::fmt::Debug {
 pub trait Storage: std::fmt::Debug {
     fn load(&self) -> DurableState;
     fn store(&self, state: &DurableState) -> std::io::Result<()>;
+}
+
+pub trait FileSystem {
+    fn create_dir_all(&self, path: &Path) -> std::io::Result<()>;
+    fn open(&self, path: &Path, options: OpenOptions) -> std::io::Result<Box<dyn File>>;
+}
+
+#[derive(Debug)]
+pub struct OpenOptions {
+    pub create: bool,
+    pub write: bool,
+    pub read: bool,
+    pub truncate: bool,
+}
+
+#[derive(Debug)]
+pub struct Metadata {
+    pub len: u64,
+}
+
+impl Metadata {
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+}
+
+pub trait File: std::io::Read + std::io::Write {
+    fn metadata(&self) -> std::io::Result<Metadata>;
 }

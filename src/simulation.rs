@@ -1,4 +1,10 @@
-use std::{cell::RefCell, collections::HashSet, panic::UnwindSafe, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+    panic::UnwindSafe,
+    path::PathBuf,
+    rc::Rc,
+};
 
 use rand::{
     rngs::StdRng,
@@ -8,7 +14,7 @@ use rand::{
 
 use crate::{
     activity_log::ActivityLog,
-    contracts::{self, MessageBus},
+    contracts::{self, FileSystem, MessageBus},
     oracle::Oracle,
     types::{AcceptInput, AcceptOutput, PrepareInput, PrepareOutput, ReplicaId},
     Replica,
@@ -589,13 +595,196 @@ impl contracts::MessageBus for SimMessageBus {
     }
 }
 
+struct SimFileSystem {
+    dirs: Rc<RefCell<HashSet<PathBuf>>>,
+    cache: Rc<RefCell<HashMap<PathBuf, Vec<u8>>>>,
+    disk: Rc<RefCell<HashMap<PathBuf, Vec<u8>>>>,
+}
+
+impl SimFileSystem {
+    fn new() -> Self {
+        let fs = SimFileSystem {
+            dirs: Rc::new(RefCell::new(HashSet::new())),
+            cache: Rc::new(RefCell::new(HashMap::new())),
+            disk: Rc::new(RefCell::new(HashMap::new())),
+        };
+        fs.create_dir_all(&PathBuf::from(".")).unwrap();
+        fs
+    }
+}
+
+struct SimFile {
+    dirs: Rc<RefCell<HashSet<PathBuf>>>,
+    cache: Rc<RefCell<HashMap<PathBuf, Vec<u8>>>>,
+    disk: Rc<RefCell<HashMap<PathBuf, Vec<u8>>>>,
+    path: PathBuf,
+    position: usize,
+    open_options: contracts::OpenOptions,
+}
+
+impl contracts::FileSystem for SimFileSystem {
+    fn create_dir_all(&self, path: &std::path::Path) -> std::io::Result<()> {
+        let mut dirs = self.dirs.borrow_mut();
+
+        let mut current_path: PathBuf = PathBuf::new();
+
+        for component in path.components() {
+            match component {
+                std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                    current_path = current_path.join(std::path::Component::RootDir.as_os_str());
+                }
+                std::path::Component::ParentDir => {
+                    continue;
+                }
+                std::path::Component::CurDir => {
+                    current_path = current_path.join(".");
+
+                    if !dirs.contains(&current_path) {
+                        dirs.insert(current_path.clone());
+                    }
+                }
+                std::path::Component::Normal(dir) => {
+                    current_path = current_path.join(dir);
+
+                    if !dirs.contains(&current_path) {
+                        dirs.insert(current_path.clone());
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn open(
+        &self,
+        path: &std::path::Path,
+        options: contracts::OpenOptions,
+    ) -> std::io::Result<Box<dyn contracts::File>> {
+        if !self
+            .dirs
+            .borrow()
+            .contains(&PathBuf::from(path.parent().unwrap()))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "No such file or directory",
+            ));
+        }
+
+        if !self.cache.borrow().contains_key(path) {
+            if options.create {
+                self.cache.borrow_mut().insert(path.to_owned(), Vec::new());
+            } else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "No such file or directory",
+                ));
+            }
+        }
+
+        if options.truncate {
+            self.cache.borrow_mut().insert(path.to_owned(), Vec::new());
+        }
+
+        Ok(Box::new(SimFile::new(
+            Rc::clone(&self.dirs),
+            Rc::clone(&self.cache),
+            Rc::clone(&self.disk),
+            path.to_owned(),
+            options,
+        )))
+    }
+}
+
+impl SimFile {
+    fn new(
+        dirs: Rc<RefCell<HashSet<PathBuf>>>,
+        cache: Rc<RefCell<HashMap<PathBuf, Vec<u8>>>>,
+        disk: Rc<RefCell<HashMap<PathBuf, Vec<u8>>>>,
+        path: PathBuf,
+        open_options: contracts::OpenOptions,
+    ) -> Self {
+        Self {
+            dirs,
+            cache,
+            disk,
+            path,
+            position: 0,
+            open_options,
+        }
+    }
+}
+
+impl std::io::Read for SimFile {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if !self.open_options.read {
+            return Err(std::io::Error::new(std::io::ErrorKind::Uncategorized, ""));
+        }
+        let cache = self.cache.borrow();
+
+        let parent = self.path.parent().unwrap();
+
+        let data = cache.get(&self.path).unwrap();
+        if self.position >= data.len() {
+            return Ok(0);
+        }
+
+        let end = std::cmp::min(data.len(), buf.len());
+        #[allow(clippy::manual_memcpy)]
+        for i in self.position..end {
+            buf[i] = data[i];
+        }
+
+        let bytes_read = end - self.position;
+        self.position += bytes_read;
+        Ok(bytes_read)
+    }
+}
+
+impl std::io::Write for SimFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if !self.open_options.write {
+            return Err(std::io::Error::new(std::io::ErrorKind::Uncategorized, ""));
+        }
+
+        let mut cache = self.cache.borrow_mut();
+        let data = cache.get_mut(&self.path).unwrap();
+        data.write_all(buf).unwrap();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let cache = self.cache.borrow();
+        let mut disk = self.disk.borrow_mut();
+        if let Some(data) = cache.get(&self.path).cloned() {
+            disk.insert(self.path.clone(), data);
+        }
+        Ok(())
+    }
+}
+
+impl contracts::File for SimFile {
+    fn metadata(&self) -> std::io::Result<contracts::Metadata> {
+        let cache = self.cache.borrow();
+        let data = cache.get(&self.path).unwrap();
+        Ok(contracts::Metadata {
+            len: data.len() as u64,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::{io::Read, path::PathBuf};
+
     use anyhow::Result;
 
+    use quickcheck::quickcheck;
     use rand::{Rng, SeedableRng};
+    use uuid::Uuid;
 
-    use crate::{in_memory_storage::InMemoryStorage, Config, Replica};
+    use crate::{file_storage::FileStorage, Config, Replica};
 
     use super::*;
     #[test]
@@ -667,7 +856,13 @@ mod tests {
                                             replicas: servers.clone(),
                                         },
                                         Rc::clone(&bus) as Rc<dyn contracts::MessageBus>,
-                                        Rc::new(InMemoryStorage::new()),
+                                        Rc::new(
+                                            FileStorage::new(
+                                                Rc::new(SimFileSystem::new()),
+                                                PathBuf::from("dir"),
+                                            )
+                                            .unwrap(),
+                                        ),
                                     )
                                 })
                                 .collect();
@@ -700,5 +895,161 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[derive(Debug, Clone)]
+    enum FileSystemOp {
+        CreateDirAll(PathBuf),
+        Open(PathBuf, bool, bool, bool, bool),
+        Read(usize, usize),
+    }
+
+    impl quickcheck::Arbitrary for FileSystemOp {
+        fn arbitrary(g: &mut quickcheck::Gen) -> Self {
+            let mut path = PathBuf::from("");
+            let max_depth = u8::arbitrary(g) % 5;
+            for i in 1..max_depth {
+                path = path.join(i.to_string());
+            }
+
+            if bool::arbitrary(g) {
+                FileSystemOp::CreateDirAll(path)
+            } else if bool::arbitrary(g) {
+                let create = bool::arbitrary(g);
+
+                let truncate = bool::arbitrary(g);
+                // Create and Truncate requires write.
+                let mut write = create || truncate || bool::arbitrary(g);
+
+                let mut read = bool::arbitrary(g);
+
+                // At least one of read or write must be true.
+                if !write && !read {
+                    if bool::arbitrary(g) {
+                        write = true;
+                    } else {
+                        read = true;
+                    }
+                }
+                FileSystemOp::Open(path, create, write, read, truncate)
+            } else {
+                FileSystemOp::Read(usize::arbitrary(g), usize::arbitrary(g) % 1024)
+            }
+        }
+    }
+
+    fn check_sim_file_system(ops: Vec<FileSystemOp>) -> bool {
+        let fs = SimFileSystem::new();
+        let dir = std::env::temp_dir().join(Uuid::new_v4().to_string());
+        let mut files = Vec::new();
+
+        for op in ops {
+            match op {
+                FileSystemOp::CreateDirAll(path) => {
+                    let path = dir.join(path);
+                    std::fs::create_dir_all(&path).unwrap();
+                    fs.create_dir_all(&path).unwrap();
+                }
+                FileSystemOp::Open(path, create, write, read, truncate) => {
+                    let path = dir.join(path).join("filename");
+
+                    let model_result = std::fs::OpenOptions::new()
+                        .create(create)
+                        .write(write)
+                        .read(read)
+                        .truncate(truncate)
+                        .open(&path);
+
+                    let result = fs.open(
+                        &path,
+                        contracts::OpenOptions {
+                            create,
+                            write,
+                            read,
+                            truncate,
+                        },
+                    );
+
+                    if model_result.is_err() {
+                        assert_eq!(
+                            model_result.err().map(|err| err.kind()),
+                            result.err().map(|err| err.kind())
+                        );
+                    } else {
+                        assert!(result.is_ok(), "path={path:?} {:?}", result.err());
+                        files.push((model_result.unwrap(), result.unwrap()));
+                    }
+                }
+                FileSystemOp::Read(i, buffer_size) => {
+                    if files.is_empty() {
+                        continue;
+                    }
+
+                    let i = i % files.len();
+                    let f = &mut files[i];
+                    let mut model_buffer = vec![0_u8; buffer_size];
+                    let model_result = f.0.read(&mut model_buffer);
+
+                    let mut buffer = vec![0_u8; buffer_size];
+                    let result = f.1.read(&mut buffer);
+
+                    if model_result.is_err() {
+                        assert_eq!(
+                            model_result.err().map(|err| err.kind()),
+                            result.err().map(|err| err.kind())
+                        );
+                    } else {
+                        assert!(result.is_ok());
+                        assert_eq!(
+                            model_buffer[0..model_result.unwrap()],
+                            buffer[0..result.unwrap()]
+                        );
+                    }
+                }
+            }
+        }
+
+        true
+    }
+
+    quickcheck! {
+      #[test]
+      fn test_sim_file_system(ops: Vec<FileSystemOp>) -> bool {
+        check_sim_file_system(ops)
+      }
+    }
+
+    #[test]
+    fn test_sim_file_system_1() {
+        assert!(check_sim_file_system(vec![
+            FileSystemOp::CreateDirAll(PathBuf::from("1")),
+            FileSystemOp::Open(PathBuf::from("1"), true, true, false, false),
+        ]));
+    }
+
+    #[test]
+    fn test_sim_file_system_2() {
+        assert!(check_sim_file_system(vec![
+            FileSystemOp::CreateDirAll(PathBuf::from("1")),
+            FileSystemOp::Open(PathBuf::from(""), true, true, false, false),
+            FileSystemOp::Read(10681956722829677122, 278)
+        ]));
+    }
+
+    #[test]
+    fn test_sim_file_system_3() {
+        assert!(check_sim_file_system(vec![
+            FileSystemOp::CreateDirAll(PathBuf::from("")),
+            FileSystemOp::Open(PathBuf::from(""), false, true, false, false)
+        ]));
+    }
+
+    #[test]
+    fn test_sim_file_system_4() {
+        assert!(check_sim_file_system(vec![
+            FileSystemOp::CreateDirAll(PathBuf::from("1")),
+            FileSystemOp::Open(PathBuf::from(""), true, true, false, false),
+            FileSystemOp::Read(10455096010292380886, 99)
+        ]));
     }
 }
