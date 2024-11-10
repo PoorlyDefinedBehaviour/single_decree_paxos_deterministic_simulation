@@ -91,7 +91,7 @@ impl contracts::Storage for FileStorage {
         let mut file = create_or_truncate_file(self.fs.as_ref(), &temp_file_path)?;
         file.write_all(serde_json::to_string(state).unwrap().as_ref())?;
         file.flush()?;
-        std::fs::rename(temp_file_path, final_file_path)?;
+        self.fs.rename(&temp_file_path, &final_file_path)?;
         // TODO: need to fsync dir?
         *self.state.borrow_mut() = Some(state.to_owned());
         *self.file.borrow_mut() = file;
@@ -123,6 +123,10 @@ impl contracts::FileSystem for Fs {
             .write(options.write)
             .open(path)?;
         Ok(Box::new(file))
+    }
+
+    fn rename(&self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+        std::fs::rename(from, to)
     }
 }
 

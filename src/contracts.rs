@@ -29,6 +29,7 @@ pub trait Storage: std::fmt::Debug {
 pub trait FileSystem {
     fn create_dir_all(&self, path: &Path) -> std::io::Result<()>;
     fn open(&self, path: &Path, options: OpenOptions) -> std::io::Result<Box<dyn File>>;
+    fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()>;
 }
 
 #[derive(Debug)]

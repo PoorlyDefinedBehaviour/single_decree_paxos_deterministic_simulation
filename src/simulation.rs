@@ -597,8 +597,14 @@ impl contracts::MessageBus for SimMessageBus {
 
 struct SimFileSystem {
     dirs: Rc<RefCell<HashSet<PathBuf>>>,
-    cache: Rc<RefCell<HashMap<PathBuf, Vec<u8>>>>,
+    cache: Rc<RefCell<HashMap<PathBuf, Rc<RefCell<FakeFile>>>>>,
     disk: Rc<RefCell<HashMap<PathBuf, Vec<u8>>>>,
+}
+
+#[derive(Debug)]
+struct FakeFile {
+    path: PathBuf,
+    data: Vec<u8>,
 }
 
 impl SimFileSystem {
@@ -615,11 +621,11 @@ impl SimFileSystem {
 
 struct SimFile {
     dirs: Rc<RefCell<HashSet<PathBuf>>>,
-    cache: Rc<RefCell<HashMap<PathBuf, Vec<u8>>>>,
+    cache: Rc<RefCell<HashMap<PathBuf, Rc<RefCell<FakeFile>>>>>,
     disk: Rc<RefCell<HashMap<PathBuf, Vec<u8>>>>,
-    path: PathBuf,
     position: usize,
     open_options: contracts::OpenOptions,
+    file: Rc<RefCell<FakeFile>>,
 }
 
 impl contracts::FileSystem for SimFileSystem {
@@ -672,10 +678,45 @@ impl contracts::FileSystem for SimFileSystem {
             ));
         }
 
-        if !self.cache.borrow().contains_key(path) {
-            if options.create {
-                self.cache.borrow_mut().insert(path.to_owned(), Vec::new());
-            } else {
+        let mut cache = self.cache.borrow_mut();
+
+        if options.create && !cache.contains_key(path) {
+            cache.insert(
+                path.to_owned(),
+                Rc::new(RefCell::new(FakeFile {
+                    path: path.to_owned(),
+                    data: Vec::new(),
+                })),
+            );
+        }
+
+        match cache.get_mut(path) {
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "No such file or directory",
+                ));
+            }
+            Some(file) => {
+                if options.truncate {
+                    file.borrow_mut().data = Vec::new();
+                }
+
+                println!("open: cloned file path={path:?}");
+                Ok(Box::new(SimFile::new(
+                    Rc::clone(&self.dirs),
+                    Rc::clone(&self.cache),
+                    Rc::clone(&self.disk),
+                    options,
+                    Rc::clone(&file),
+                )))
+            }
+        }
+    }
+
+    fn rename(&self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+        if let Some(parent) = to.parent() {
+            if !self.dirs.borrow().contains(&PathBuf::from(parent)) {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
                     "No such file or directory",
@@ -683,35 +724,37 @@ impl contracts::FileSystem for SimFileSystem {
             }
         }
 
-        if options.truncate {
-            self.cache.borrow_mut().insert(path.to_owned(), Vec::new());
-        }
+        let mut cache = self.cache.borrow_mut();
 
-        Ok(Box::new(SimFile::new(
-            Rc::clone(&self.dirs),
-            Rc::clone(&self.cache),
-            Rc::clone(&self.disk),
-            path.to_owned(),
-            options,
-        )))
+        let Some(file) = cache.remove(from) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "No such file or directory",
+            ));
+        };
+
+        file.borrow_mut().path = to.to_owned();
+        cache.insert(to.to_owned(), file);
+
+        Ok(())
     }
 }
 
 impl SimFile {
     fn new(
         dirs: Rc<RefCell<HashSet<PathBuf>>>,
-        cache: Rc<RefCell<HashMap<PathBuf, Vec<u8>>>>,
+        cache: Rc<RefCell<HashMap<PathBuf, Rc<RefCell<FakeFile>>>>>,
         disk: Rc<RefCell<HashMap<PathBuf, Vec<u8>>>>,
-        path: PathBuf,
         open_options: contracts::OpenOptions,
+        file: Rc<RefCell<FakeFile>>,
     ) -> Self {
         Self {
             dirs,
             cache,
             disk,
-            path,
             position: 0,
             open_options,
+            file,
         }
     }
 }
@@ -721,24 +764,23 @@ impl std::io::Read for SimFile {
         if !self.open_options.read {
             return Err(std::io::Error::new(std::io::ErrorKind::Uncategorized, ""));
         }
-        let cache = self.cache.borrow();
 
-        let parent = self.path.parent().unwrap();
+        let file = self.file.borrow();
 
-        let data = cache.get(&self.path).unwrap();
-        if self.position >= data.len() {
+        if self.position >= file.data.len() {
             return Ok(0);
         }
 
-        let end = std::cmp::min(data.len(), buf.len());
+        let num_bytes_to_read =
+            std::cmp::min(file.data.len().saturating_sub(self.position), buf.len());
+
         #[allow(clippy::manual_memcpy)]
-        for i in self.position..end {
-            buf[i] = data[i];
+        for i in 0..num_bytes_to_read {
+            buf[i] = file.data[self.position + i];
         }
 
-        let bytes_read = end - self.position;
-        self.position += bytes_read;
-        Ok(bytes_read)
+        self.position += num_bytes_to_read;
+        Ok(num_bytes_to_read)
     }
 }
 
@@ -748,35 +790,68 @@ impl std::io::Write for SimFile {
             return Err(std::io::Error::new(std::io::ErrorKind::Uncategorized, ""));
         }
 
+        let mut file = self.file.borrow_mut();
         let mut cache = self.cache.borrow_mut();
-        let data = cache.get_mut(&self.path).unwrap();
-        data.write_all(buf).unwrap();
+
+        if !cache.contains_key(&file.path) {
+            println!(
+                "file not in cache, returning bad file desc path={:?} cache={cache:?}",
+                &file.path,
+            );
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Uncategorized,
+                "Bad file descriptor",
+            ));
+        }
+
+        if file.data.len() < self.position + buf.len() {
+            file.data.resize(self.position + buf.len(), 0);
+        }
+
+        for i in 0..buf.len() {
+            file.data[self.position + i] = buf[i];
+        }
+        self.position += buf.len();
+
+        dbg!(&file.data);
+        dbg!(cache.get(&file.path));
+
         Ok(buf.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        let cache = self.cache.borrow();
-        let mut disk = self.disk.borrow_mut();
-        if let Some(data) = cache.get(&self.path).cloned() {
-            disk.insert(self.path.clone(), data);
+        let file = self.file.borrow();
+
+        if !self.cache.borrow().contains_key(&file.path) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Uncategorized,
+                "Bad file descriptor",
+            ));
         }
+
+        let mut disk = self.disk.borrow_mut();
+
+        disk.insert(file.path.clone(), file.data.clone());
+
         Ok(())
     }
 }
 
 impl contracts::File for SimFile {
     fn metadata(&self) -> std::io::Result<contracts::Metadata> {
-        let cache = self.cache.borrow();
-        let data = cache.get(&self.path).unwrap();
+        let file = self.file.borrow();
         Ok(contracts::Metadata {
-            len: data.len() as u64,
+            len: file.data.len() as u64,
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{io::Read, path::PathBuf};
+    use std::{
+        io::{Read, Write},
+        path::PathBuf,
+    };
 
     use anyhow::Result;
 
@@ -787,6 +862,7 @@ mod tests {
     use crate::{file_storage::FileStorage, Config, Replica};
 
     use super::*;
+
     #[test]
     fn action_simulation() -> Result<()> {
         let count = if std::env::var("SEED").is_ok() {
@@ -902,6 +978,9 @@ mod tests {
         CreateDirAll(PathBuf),
         Open(PathBuf, bool, bool, bool, bool),
         Read(usize, usize),
+        Write(usize, String),
+        Rename(PathBuf, PathBuf),
+        Metadata(usize),
     }
 
     impl quickcheck::Arbitrary for FileSystemOp {
@@ -932,8 +1011,19 @@ mod tests {
                     }
                 }
                 FileSystemOp::Open(path, create, write, read, truncate)
-            } else {
+            } else if bool::arbitrary(g) {
+                let mut new_path = PathBuf::from("");
+                let max_depth = u8::arbitrary(g) % 5;
+                for i in 1..max_depth {
+                    new_path = new_path.join(i.to_string());
+                }
+                FileSystemOp::Rename(path, new_path)
+            } else if bool::arbitrary(g) {
+                FileSystemOp::Metadata(usize::arbitrary(g))
+            } else if bool::arbitrary(g) {
                 FileSystemOp::Read(usize::arbitrary(g), usize::arbitrary(g) % 1024)
+            } else {
+                FileSystemOp::Write(usize::arbitrary(g), String::arbitrary(g))
             }
         }
     }
@@ -987,6 +1077,7 @@ mod tests {
 
                     let i = i % files.len();
                     let f = &mut files[i];
+
                     let mut model_buffer = vec![0_u8; buffer_size];
                     let model_result = f.0.read(&mut model_buffer);
 
@@ -1004,6 +1095,59 @@ mod tests {
                             model_buffer[0..model_result.unwrap()],
                             buffer[0..result.unwrap()]
                         );
+                    }
+                }
+                FileSystemOp::Write(i, data) => {
+                    if files.is_empty() {
+                        continue;
+                    }
+
+                    let i = i % files.len();
+                    let f = &mut files[i];
+
+                    let model_result = f.0.write_all(data.as_ref());
+                    let result = f.1.write_all(data.as_ref());
+
+                    if model_result.is_err() {
+                        assert_eq!(
+                            model_result.err().map(|err| err.kind()),
+                            result.err().map(|err| err.kind())
+                        );
+                    } else {
+                        dbg!(&model_result, &result);
+                        assert_eq!(model_result.unwrap(), result.unwrap());
+                    }
+                }
+                FileSystemOp::Rename(from, to) => {
+                    let from_path = dir.join(from).join("filename");
+                    let to_path = dir.join(to).join("filename");
+                    let model_result = std::fs::rename(&from_path, &to_path);
+                    let result = fs.rename(&from_path, &to_path);
+
+                    // .err() returns None when the result is an Ok().
+                    assert_eq!(
+                        model_result.err().map(|err| err.kind()),
+                        result.err().map(|err| err.kind())
+                    );
+                }
+                FileSystemOp::Metadata(i) => {
+                    if files.is_empty() {
+                        continue;
+                    }
+
+                    let i = i % files.len();
+                    let f = &mut files[i];
+
+                    let model_result = f.0.metadata();
+                    let result = f.1.metadata();
+
+                    if model_result.is_err() {
+                        assert_eq!(
+                            model_result.err().map(|err| err.kind()),
+                            result.err().map(|err| err.kind())
+                        );
+                    } else {
+                        assert_eq!(model_result.unwrap().len(), result.unwrap().len());
                     }
                 }
             }
@@ -1051,5 +1195,111 @@ mod tests {
             FileSystemOp::Open(PathBuf::from(""), true, true, false, false),
             FileSystemOp::Read(10455096010292380886, 99)
         ]));
+    }
+
+    #[test]
+    fn test_sim_file_system_5() {
+        assert!(check_sim_file_system(vec![FileSystemOp::Rename(
+            PathBuf::from(""),
+            PathBuf::from("")
+        )]));
+    }
+
+    #[test]
+    fn test_sim_file_system_6() {
+        assert!(check_sim_file_system(vec![
+            FileSystemOp::CreateDirAll(PathBuf::from("1/2")),
+            FileSystemOp::Open(PathBuf::from(""), true, true, false, true),
+            FileSystemOp::Open(PathBuf::from("1"), true, true, false, true),
+            FileSystemOp::Open(PathBuf::from(""), false, false, true, false),
+            FileSystemOp::Open(PathBuf::from(""), false, false, true, false),
+            FileSystemOp::Rename(PathBuf::from(""), PathBuf::from("1")),
+            FileSystemOp::Read(18207958439361410334, 706)
+        ]));
+    }
+
+    #[test]
+    fn test_sim_file_system_7() {
+        assert!(check_sim_file_system(vec![
+            FileSystemOp::CreateDirAll(PathBuf::from("1/2/3")),
+            FileSystemOp::Open(PathBuf::from("1/2"), true, true, false, false),
+            FileSystemOp::Open(PathBuf::from("1"), true, true, false, true),
+            FileSystemOp::Open(PathBuf::from("1/2"), false, true, true, true),
+            FileSystemOp::Rename(PathBuf::from("1"), PathBuf::from("1/2")),
+            FileSystemOp::Rename(PathBuf::from("1/2"), PathBuf::from("1"))
+        ]));
+    }
+
+    #[test]
+    fn test_sim_file_system_8() {
+        assert!(check_sim_file_system(vec![
+            FileSystemOp::CreateDirAll(PathBuf::from("1/2/3")),
+            FileSystemOp::Open(PathBuf::from("1"), true, true, true, false),
+            FileSystemOp::Rename(PathBuf::from("1"), PathBuf::from("1/2")),
+            FileSystemOp::Metadata(4799043926653059155)
+        ]));
+    }
+
+    #[test]
+    fn test_sim_file_system_9() {
+        assert!(check_sim_file_system(vec![
+            FileSystemOp::CreateDirAll(PathBuf::from("1/2/3")),
+            FileSystemOp::Open(PathBuf::from(""), true, true, true, false),
+            FileSystemOp::Rename(PathBuf::from(""), PathBuf::from("1/2/3")),
+            FileSystemOp::Write(12533627569028686350, "something".to_owned())
+        ]));
+    }
+
+    #[test]
+    fn test_sim_file_system_10() {
+        assert!(check_sim_file_system(vec![
+          FileSystemOp::CreateDirAll(PathBuf::from("1/2")),
+           FileSystemOp::Open(PathBuf::from(""), true, true, true, false), 
+          FileSystemOp::Write(18241168806576859958, "\"'삼\u{10}큺\"⁞\u{202b}!\u{86}\u{9d}\"|%\u{6dd}7%鼀\u{ffffe}\u{92}£/1k\u{8b}\u{7cfd8}\u{7}\u{8e}#․\u{82}6\u{93}\u{10ffff}©'f毽鎓‑".to_owned()), 
+          FileSystemOp::Read(16832975082365959816, 784)
+        ]));
+    }
+
+    #[test]
+    fn test_sim_file_system_11() {
+        assert!(check_sim_file_system(vec![
+            FileSystemOp::CreateDirAll(PathBuf::from("1/2/3")),
+            FileSystemOp::Open(PathBuf::from("1/2"), true, true, false, false),
+            FileSystemOp::Write(0, "1".to_owned()),
+            FileSystemOp::Open(PathBuf::from("1/2"), true, true, false, false),
+            FileSystemOp::Write(16905408381814530071, "2".to_owned()),
+            FileSystemOp::Metadata(8885628981026197665)
+        ]));
+    }
+
+    #[test]
+    fn test_sim_file_system_12() {
+        assert!(check_sim_file_system(vec![
+            FileSystemOp::CreateDirAll(PathBuf::from("")),
+            FileSystemOp::Open(PathBuf::from(""), true, true, true, true),
+            FileSystemOp::Open(PathBuf::from(""), false, true, true, true),
+            FileSystemOp::Open(PathBuf::from(""), true, true, true, false),
+            FileSystemOp::Write(6717171345989498156, "\u{ab1a}+".to_owned()),
+            FileSystemOp::Write(
+                13967837215084670067,
+                "0\u{9b}\u{2}x\u{95};‾T\u{84}‟4".to_owned() // "a".to_owned(),
+            ),
+            FileSystemOp::Open(PathBuf::from(""), true, true, false, false),
+            FileSystemOp::Read(9189333954227666122, 996)
+        ]));
+    }
+
+    #[test]
+    fn test_sim_file_system_13() {
+        assert!(check_sim_file_system(vec!
+          [
+            FileSystemOp::CreateDirAll(PathBuf::from("1/2/3")), 
+            FileSystemOp::Open(PathBuf::from(""), true, true, false, true), 
+            FileSystemOp::Open(PathBuf::from("1"), true, true, false, true), 
+            FileSystemOp::Rename(PathBuf::from("1"), PathBuf::from("")), 
+            FileSystemOp::Open(PathBuf::from(""), false, true, true, true), 
+            FileSystemOp::Rename(PathBuf::from(""), PathBuf::from("1")), 
+            FileSystemOp::Write(3533282638751806929, "⁄Bn⁔\"'A\u{7836f}@\u{8b}R\u{f2f1}\u{fffa}%W\u{6}5`s㼞3㘕\u{8}[%⁍헦,\t7\u{11}\t\u{206b}ੲ[\u{603}_1|\u{f261}¥\u{6}r@‿51\u{2007}\u{20d0}.+\u{b}\0\u{6dd}i¤I\u{202f}@.튃3\u{99}‑".to_owned())]
+        ));
     }
 }
