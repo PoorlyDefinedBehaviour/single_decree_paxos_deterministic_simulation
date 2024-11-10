@@ -1,3 +1,6 @@
+#![allow(clippy::unit_cmp)]
+
+use core::iter::Iterator;
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
@@ -620,7 +623,6 @@ impl SimFileSystem {
 }
 
 struct SimFile {
-    dirs: Rc<RefCell<HashSet<PathBuf>>>,
     cache: Rc<RefCell<HashMap<PathBuf, Rc<RefCell<FakeFile>>>>>,
     disk: Rc<RefCell<HashMap<PathBuf, Vec<u8>>>>,
     position: usize,
@@ -691,24 +693,21 @@ impl contracts::FileSystem for SimFileSystem {
         }
 
         match cache.get_mut(path) {
-            None => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "No such file or directory",
-                ));
-            }
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "No such file or directory",
+            )),
             Some(file) => {
                 if options.truncate {
-                    file.borrow_mut().data = Vec::new();
+                    let mut file = file.borrow_mut();
+                    file.data = Vec::new();
                 }
 
-                println!("open: cloned file path={path:?}");
                 Ok(Box::new(SimFile::new(
-                    Rc::clone(&self.dirs),
                     Rc::clone(&self.cache),
                     Rc::clone(&self.disk),
                     options,
-                    Rc::clone(&file),
+                    Rc::clone(file),
                 )))
             }
         }
@@ -742,14 +741,12 @@ impl contracts::FileSystem for SimFileSystem {
 
 impl SimFile {
     fn new(
-        dirs: Rc<RefCell<HashSet<PathBuf>>>,
         cache: Rc<RefCell<HashMap<PathBuf, Rc<RefCell<FakeFile>>>>>,
         disk: Rc<RefCell<HashMap<PathBuf, Vec<u8>>>>,
         open_options: contracts::OpenOptions,
         file: Rc<RefCell<FakeFile>>,
     ) -> Self {
         Self {
-            dirs,
             cache,
             disk,
             position: 0,
@@ -791,30 +788,15 @@ impl std::io::Write for SimFile {
         }
 
         let mut file = self.file.borrow_mut();
-        let mut cache = self.cache.borrow_mut();
-
-        if !cache.contains_key(&file.path) {
-            println!(
-                "file not in cache, returning bad file desc path={:?} cache={cache:?}",
-                &file.path,
-            );
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Uncategorized,
-                "Bad file descriptor",
-            ));
-        }
 
         if file.data.len() < self.position + buf.len() {
             file.data.resize(self.position + buf.len(), 0);
         }
 
-        for i in 0..buf.len() {
-            file.data[self.position + i] = buf[i];
+        for (i, byte) in buf.iter().enumerate() {
+            file.data[self.position + i] = *byte;
         }
         self.position += buf.len();
-
-        dbg!(&file.data);
-        dbg!(cache.get(&file.path));
 
         Ok(buf.len())
     }
@@ -1114,7 +1096,6 @@ mod tests {
                             result.err().map(|err| err.kind())
                         );
                     } else {
-                        dbg!(&model_result, &result);
                         assert_eq!(model_result.unwrap(), result.unwrap());
                     }
                 }
