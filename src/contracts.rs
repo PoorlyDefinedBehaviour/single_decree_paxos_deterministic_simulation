@@ -49,6 +49,10 @@ impl Metadata {
     pub fn len(&self) -> u64 {
         self.len
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 pub trait File: std::io::Read + std::io::Write {

@@ -3,6 +3,12 @@ pub struct ActivityLog {
     buffer: Vec<String>,
 }
 
+impl Default for ActivityLog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ActivityLog {
     pub fn new() -> Self {
         Self { buffer: Vec::new() }

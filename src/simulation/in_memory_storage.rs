@@ -6,6 +6,12 @@ pub struct InMemoryStorage {
     state: RefCell<Option<contracts::DurableState>>,
 }
 
+impl Default for InMemoryStorage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InMemoryStorage {
     pub fn new() -> Self {
         Self {

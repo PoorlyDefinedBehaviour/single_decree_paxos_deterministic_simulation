@@ -4,10 +4,10 @@ use std::{
     rc::Rc,
 };
 
-use crate::{
-    activity_log::ActivityLog,
-    types::{AcceptInput, AcceptOutput,  ReplicaId, RequestId},
-};
+use crate::types::{AcceptInput, AcceptOutput,  ReplicaId, RequestId};
+
+
+use super::activity_log::ActivityLog;
 
 #[derive(Debug)]
 pub struct Oracle {

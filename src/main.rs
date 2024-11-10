@@ -10,13 +10,12 @@ use types::{
     AcceptInput, AcceptOutput, PrepareInput, PrepareOutput, ProposalNumber, ReplicaId, RequestId,
 };
 
-mod activity_log;
-mod contracts;
-mod file_storage;
-mod in_memory_storage;
-mod oracle;
-mod simulation;
-mod types;
+pub mod contracts;
+pub mod file_storage;
+
+#[cfg(test)]
+pub mod simulation;
+pub mod types;
 
 #[derive(Debug)]
 pub struct Replica {
@@ -43,7 +42,7 @@ pub struct Config {
 }
 
 impl Replica {
-    fn new(
+    pub fn new(
         config: Config,
         bus: Rc<dyn contracts::MessageBus>,
         storage: Rc<dyn contracts::Storage>,
@@ -73,12 +72,12 @@ impl Replica {
         Ok(self.state.min_proposal_number)
     }
 
-    fn on_start_proposal(&mut self, value: String) {
+    pub fn on_start_proposal(&mut self, value: String) {
         let proposal_number = self.next_proposal_number().unwrap();
         self.broadcast_prepare(proposal_number, value);
     }
 
-    fn on_prepare(&mut self, input: PrepareInput) {
+    pub fn on_prepare(&mut self, input: PrepareInput) {
         if input.proposal_number > self.state.min_proposal_number {
             let mut state = self.state.clone();
             state.min_proposal_number = input.proposal_number;
@@ -97,7 +96,7 @@ impl Replica {
         }
     }
 
-    fn on_prepare_response(&mut self, input: PrepareOutput) {
+    pub fn on_prepare_response(&mut self, input: PrepareOutput) {
         let majority = self.majority();
         let request_id = input.request_id;
 
@@ -122,7 +121,7 @@ impl Replica {
         }
     }
 
-    fn on_accept(&mut self, input: AcceptInput) {
+    pub fn on_accept(&mut self, input: AcceptInput) {
         if input.proposal_number >= self.state.min_proposal_number {
             let mut state = self.state.clone();
             state.accepted_proposal_number = Some(input.proposal_number);
@@ -141,7 +140,7 @@ impl Replica {
         }
     }
 
-    fn on_accept_response(&mut self, input: AcceptOutput) {
+    pub fn on_accept_response(&mut self, _input: AcceptOutput) {
         // TODO: clean up inflight requests.
     }
 

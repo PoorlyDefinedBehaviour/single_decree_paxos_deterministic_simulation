@@ -1,6 +1,12 @@
-use crate::contracts::{self, FileSystem};
+use crate::contracts::{self};
 use anyhow::Result;
-use std::{cell::RefCell, fs::OpenOptions, io::Write, path::PathBuf, rc::Rc};
+use std::{
+    cell::RefCell,
+    fs::OpenOptions,
+    io::Write,
+    path::{Path, PathBuf},
+    rc::Rc,
+};
 
 pub struct FileStorage {
     fs: Rc<dyn contracts::FileSystem>,
@@ -26,7 +32,7 @@ impl FileStorage {
 
         let mut file = create_or_open_file(fs.as_ref(), &path)?;
 
-        let state = if file.metadata()?.len() == 0 {
+        let state = if file.metadata()?.is_empty() {
             None
         } else {
             let mut buffer = Vec::new();
@@ -45,7 +51,7 @@ impl FileStorage {
 
 fn create_or_open_file(
     fs: &dyn contracts::FileSystem,
-    path: &PathBuf,
+    path: &Path,
 ) -> std::io::Result<Box<dyn contracts::File>> {
     fs.open(
         path,
@@ -60,7 +66,7 @@ fn create_or_open_file(
 
 fn create_or_truncate_file(
     fs: &dyn contracts::FileSystem,
-    path: &PathBuf,
+    path: &Path,
 ) -> std::io::Result<Box<dyn contracts::File>> {
     fs.open(
         path,
@@ -99,10 +105,16 @@ impl contracts::Storage for FileStorage {
     }
 }
 
-struct Fs {}
+pub struct Fs {}
+
+impl Default for Fs {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Fs {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {}
     }
 }
@@ -143,7 +155,7 @@ mod tests {
     use quickcheck::{quickcheck, Arbitrary};
     use uuid::Uuid;
 
-    use crate::in_memory_storage::InMemoryStorage;
+    use crate::simulation::in_memory_storage::InMemoryStorage;
 
     use super::*;
 
