@@ -11,6 +11,7 @@ use std::{
 pub struct FileStorage {
     fs: Rc<dyn contracts::FileSystem>,
     dir: PathBuf,
+    dir_file: Box<dyn contracts::File>,
     file: RefCell<Box<dyn contracts::File>>,
     state: RefCell<Option<contracts::DurableState>>,
 }
@@ -25,8 +26,17 @@ impl std::fmt::Debug for FileStorage {
 
 impl FileStorage {
     pub fn new(fs: Rc<dyn contracts::FileSystem>, dir: PathBuf) -> Result<Self> {
-        // TODO: fsync dir.
         fs.create_dir_all(&dir)?;
+
+        let dir_file = fs.open(
+            &dir,
+            contracts::OpenOptions {
+                create: false,
+                read: true,
+                write: false,
+                truncate: false,
+            },
+        )?;
 
         let path = dir.join("paxos.state");
 
@@ -43,6 +53,7 @@ impl FileStorage {
         Ok(Self {
             fs,
             dir,
+            dir_file,
             file: RefCell::new(file),
             state: RefCell::new(state),
         })
@@ -96,9 +107,9 @@ impl contracts::Storage for FileStorage {
         let final_file_path = self.dir.join("paxos.state");
         let mut file = create_or_truncate_file(self.fs.as_ref(), &temp_file_path)?;
         file.write_all(serde_json::to_string(state).unwrap().as_ref())?;
-        file.flush()?;
+        file.sync_all()?;
         self.fs.rename(&temp_file_path, &final_file_path)?;
-        // TODO: need to fsync dir?
+        self.dir_file.sync_all()?;
         *self.state.borrow_mut() = Some(state.to_owned());
         *self.file.borrow_mut() = file;
         Ok(())
@@ -146,6 +157,10 @@ impl contracts::File for std::fs::File {
     fn metadata(&self) -> std::io::Result<contracts::Metadata> {
         self.metadata()
             .map(|m| contracts::Metadata { len: m.len() })
+    }
+
+    fn sync_all(&self) -> std::io::Result<()> {
+        self.sync_all()
     }
 }
 

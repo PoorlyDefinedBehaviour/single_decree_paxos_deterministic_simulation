@@ -133,6 +133,15 @@ fn on_prepare_response(&mut self, input: PrepareOutput) -> u64 {
 }
 ```
 
+Modify `FileStorage::store` to stop flushing the file contents to disk after modifying the state.
+
+```rust
+fn store(&self, state: &contracts::DurableState) -> std::io::Result<()> {
+    // Comment this line:
+    // file.sync_all()?;
+}
+```
+
 ## TODO
 
 - [x] Activity log like P-Lang has.

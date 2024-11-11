@@ -57,4 +57,5 @@ impl Metadata {
 
 pub trait File: std::io::Read + std::io::Write {
     fn metadata(&self) -> std::io::Result<Metadata>;
+    fn sync_all(&self) -> std::io::Result<()>;
 }

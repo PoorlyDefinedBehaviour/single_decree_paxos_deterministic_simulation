@@ -1,7 +1,7 @@
 #![allow(clippy::unit_cmp)]
 
 use core::iter::Iterator;
-use std::{cell::RefCell, collections::HashSet, panic::UnwindSafe, rc::Rc};
+use std::{cell::RefCell, collections::HashSet, panic::UnwindSafe, path::PathBuf, rc::Rc};
 
 use rand::{
     rngs::StdRng,
@@ -10,11 +10,13 @@ use rand::{
 
 use crate::{
     contracts::{self, MessageBus},
+    file_storage::FileStorage,
     Replica, ReplicaId,
 };
 
 use super::{
     activity_log::ActivityLog,
+    file_system::SimFileSystem,
     message_bus::{EventType, PendingMessage, SimMessageBus},
     oracle::Oracle,
 };
@@ -26,13 +28,19 @@ struct ActionSimulator {
     action_set: Vec<Action>,
     rng: Rc<RefCell<StdRng>>,
     bus: Rc<SimMessageBus>,
-    replicas: Vec<Replica>,
+    nodes: Vec<Node>,
     activity_log: Rc<RefCell<ActivityLog>>,
     healthy_replicas: HashSet<ReplicaId>,
     failed_replicas: HashSet<ReplicaId>,
 }
 
 impl UnwindSafe for ActionSimulator {}
+
+#[derive(Debug)]
+pub struct Node {
+    pub replica: Replica,
+    pub fs: Rc<SimFileSystem>,
+}
 
 #[derive(Debug)]
 pub struct ActionSimulatorConfig {
@@ -89,7 +97,7 @@ impl ActionSimulator {
     fn new(
         config: ActionSimulatorConfig,
         rng: Rc<RefCell<StdRng>>,
-        replicas: Vec<Replica>,
+        nodes: Vec<Node>,
         bus: Rc<SimMessageBus>,
         activity_log: Rc<RefCell<ActivityLog>>,
     ) -> Self {
@@ -106,15 +114,15 @@ impl ActionSimulator {
                 Action::DuplicateMessage,
             ],
             activity_log,
-            healthy_replicas: HashSet::from_iter(replicas.iter().map(|r| r.config.id)),
+            healthy_replicas: HashSet::from_iter(nodes.iter().map(|node| node.replica.config.id)),
             failed_replicas: HashSet::new(),
-            replicas,
+            nodes,
             metrics: ActionSimulatorMetrics::new(),
         }
     }
 
     fn majority(&self) -> usize {
-        self.replicas.len() / 2 + 1
+        self.nodes.len() / 2 + 1
     }
 
     fn next_action(&mut self) -> Action {
@@ -152,21 +160,27 @@ impl ActionSimulator {
 
     fn choose_healthy_replica(&mut self) -> &Replica {
         let replicas = self
-            .replicas
+            .nodes
             .iter()
-            .filter(|r| self.healthy_replicas.contains(&r.config.id));
-        replicas.choose(unsafe { &mut *self.rng.as_ptr() }).unwrap()
+            .filter(|node| self.healthy_replicas.contains(&node.replica.config.id));
+        replicas
+            .choose(unsafe { &mut *self.rng.as_ptr() })
+            .map(|node| &node.replica)
+            .unwrap()
     }
 
     fn choose_any_replica(&mut self) -> &Replica {
-        self.replicas
+        self.nodes
             .choose(unsafe { &mut *self.rng.as_ptr() })
+            .map(|node| &node.replica)
             .unwrap()
     }
 
     fn get_healthy_replica_index(&mut self, replica_id: ReplicaId) -> Option<usize> {
-        self.replicas.iter().enumerate().find_map(|(i, r)| {
-            if r.config.id == replica_id && self.healthy_replicas.contains(&r.config.id) {
+        self.nodes.iter().enumerate().find_map(|(i, node)| {
+            if node.replica.config.id == replica_id
+                && self.healthy_replicas.contains(&node.replica.config.id)
+            {
                 Some(i)
             } else {
                 None
@@ -174,12 +188,26 @@ impl ActionSimulator {
         })
     }
 
-    fn recreate_replica(&mut self, replica_id: ReplicaId) {
-        for i in 0..self.replicas.len() {
-            if self.replicas[i].config.id == replica_id {
-                let replica = self.replicas.swap_remove(i);
-                self.replicas
-                    .push(Replica::new(replica.config, replica.bus, replica.storage));
+    fn restart_node(&mut self, replica_id: ReplicaId) {
+        for i in 0..self.nodes.len() {
+            if self.nodes[i].replica.config.id == replica_id {
+                let node = self.nodes.swap_remove(i);
+                // Pretend the node restarted and the in the file system cache was lost.
+                node.fs.restart();
+                self.nodes.push(Node {
+                    replica: Replica::new(
+                        node.replica.config,
+                        node.replica.bus,
+                        Rc::new(
+                            FileStorage::new(
+                                Rc::clone(&node.fs) as Rc<dyn contracts::FileSystem>,
+                                PathBuf::from("dir"),
+                            )
+                            .unwrap(),
+                        ),
+                    ),
+                    ..node
+                });
                 return;
             }
         }
@@ -216,7 +244,7 @@ impl ActionSimulator {
                         let replica = self.choose_any_replica();
                         replica.config.id
                     };
-                    self.recreate_replica(replica_id);
+                    self.restart_node(replica_id);
                     self.failed_replicas.remove(&replica_id);
                     self.healthy_replicas.insert(replica_id);
                     self.activity_log
@@ -257,7 +285,7 @@ impl ActionSimulator {
             return;
         };
 
-        let replica = &mut self.replicas[i];
+        let node = &mut self.nodes[i];
 
         self.activity_log
             .as_ref()
@@ -266,19 +294,19 @@ impl ActionSimulator {
 
         match message {
             PendingMessage::StartProposal(_to_replica_id, value) => {
-                replica.on_start_proposal(value);
+                node.replica.on_start_proposal(value);
             }
             PendingMessage::Prepare(_to_replica_id, input) => {
-                replica.on_prepare(input);
+                node.replica.on_prepare(input);
             }
             PendingMessage::PrepareResponse(_to_replica_id, input) => {
-                replica.on_prepare_response(input);
+                node.replica.on_prepare_response(input);
             }
             PendingMessage::Accept(_to_replica_id, input) => {
-                replica.on_accept(input);
+                node.replica.on_accept(input);
             }
             PendingMessage::AcceptResponse(_to_replica_id, input) => {
-                replica.on_accept_response(input);
+                node.replica.on_accept_response(input);
             }
         }
     }
@@ -358,30 +386,34 @@ mod tests {
                                 Rc::clone(&activity_log),
                             ));
 
-                            let replicas: Vec<_> = servers
+                            let nodes: Vec<_> = servers
                                 .iter()
                                 .map(|id| {
-                                    Replica::new(
-                                        Config {
-                                            id: *id,
-                                            replicas: servers.clone(),
-                                        },
-                                        Rc::clone(&bus) as Rc<dyn contracts::MessageBus>,
-                                        Rc::new(
-                                            FileStorage::new(
-                                                Rc::new(SimFileSystem::new()),
-                                                PathBuf::from("dir"),
-                                            )
-                                            .unwrap(),
+                                    let fs = Rc::new(SimFileSystem::new());
+                                    Node {
+                                        replica: Replica::new(
+                                            Config {
+                                                id: *id,
+                                                replicas: servers.clone(),
+                                            },
+                                            Rc::clone(&bus) as Rc<dyn contracts::MessageBus>,
+                                            Rc::new(
+                                                FileStorage::new(
+                                                    Rc::clone(&fs) as Rc<dyn contracts::FileSystem>,
+                                                    PathBuf::from("dir"),
+                                                )
+                                                .unwrap(),
+                                            ),
                                         ),
-                                    )
+                                        fs,
+                                    }
                                 })
                                 .collect();
 
                             let mut sim = ActionSimulator::new(
                                 simulator_config,
                                 Rc::clone(&rng),
-                                replicas,
+                                nodes,
                                 Rc::clone(&bus),
                                 Rc::clone(&activity_log),
                             );
