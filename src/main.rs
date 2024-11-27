@@ -1,4 +1,5 @@
 #![feature(io_error_uncategorized)]
+#![feature(io_error_more)]
 
 use std::{
     collections::{HashMap, HashSet},

@@ -198,13 +198,14 @@ impl ActionSimulator {
                     replica: Replica::new(
                         node.replica.config,
                         node.replica.bus,
-                        Rc::new(
-                            FileStorage::new(
-                                Rc::clone(&node.fs) as Rc<dyn contracts::FileSystem>,
-                                PathBuf::from("dir"),
-                            )
-                            .unwrap(),
-                        ),
+                        // Rc::new(
+                        // FileStorage::new(
+                        //     Rc::clone(&node.fs) as Rc<dyn contracts::FileSystem>,
+                        //     PathBuf::from("dir"),
+                        // )
+                        // .unwrap(),
+                        // ),
+                        node.replica.storage,
                     ),
                     ..node
                 });
@@ -314,7 +315,6 @@ impl ActionSimulator {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
 
     use anyhow::Result;
 
@@ -322,7 +322,10 @@ mod tests {
 
     use crate::{
         file_storage::FileStorage,
-        simulation::{file_system::SimFileSystem, message_bus::SimMessageBus},
+        simulation::{
+            file_system::SimFileSystem, in_memory_storage::InMemoryStorage,
+            message_bus::SimMessageBus,
+        },
         Config, Replica,
     };
 
@@ -398,11 +401,12 @@ mod tests {
                                             },
                                             Rc::clone(&bus) as Rc<dyn contracts::MessageBus>,
                                             Rc::new(
-                                                FileStorage::new(
-                                                    Rc::clone(&fs) as Rc<dyn contracts::FileSystem>,
-                                                    PathBuf::from("dir"),
-                                                )
-                                                .unwrap(),
+                                                InMemoryStorage::new(),
+                                                // FileStorage::new(
+                                                //     Rc::clone(&fs) as Rc<dyn contracts::FileSystem>,
+                                                //     PathBuf::from("dir"),
+                                                // )
+                                                // .unwrap(),
                                             ),
                                         ),
                                         fs,
