@@ -222,17 +222,17 @@ impl contracts::FileSystem for SimFileSystem {
     }
 
     fn rename(&self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
-        let cache = self.cache.borrow_mut();
+        let mut cache = self.cache.borrow_mut();
+
+        if !file_exists(&cache, from) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "from path not found",
+            ));
+        }
 
         if from == to {
-            if file_exists(&cache, from) {
-                return Ok(());
-            } else {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "File not found",
-                ));
-            }
+            return Ok(());
         }
 
         if let Some(parent) = to.parent() {
@@ -254,20 +254,23 @@ impl contracts::FileSystem for SimFileSystem {
             ));
         }
 
+        cache.retain(|_fd, file| {
+            let file = file.borrow();
+            file.path != to
+        });
+
         {
-            let Some(mut file) = cache.iter().find_map(|(_fd, file)| {
-                let file = file.borrow_mut();
-                if file.path == from {
-                    Some(file)
-                } else {
-                    None
-                }
-            }) else {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "File not found",
-                ));
-            };
+            let mut file = cache
+                .iter()
+                .find_map(|(_fd, file)| {
+                    let file = file.borrow_mut();
+                    if file.path == from {
+                        Some(file)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap();
 
             file.path = to.to_owned();
         }
@@ -685,6 +688,45 @@ mod tests {
     }
 
     #[test]
+    fn test_sim_file_system_4() {
+        use FileSystemOp::*;
+
+        check_sim_file_system(vec![
+            CreateDirAll(PathBuf::from("b")),
+            Open(PathBuf::from("b/filename"), true, true, false, true),
+            Rename(PathBuf::from("b"), PathBuf::from("a")),
+            Rename(PathBuf::from("b"), PathBuf::from("a")),
+        ]);
+    }
+
+    #[test]
+    fn test_sim_file_system_5() {
+        use FileSystemOp::*;
+
+        check_sim_file_system(vec![
+            CreateDirAll(PathBuf::from("b")),
+            Open(PathBuf::from("b/filename"), true, true, false, false),
+            CreateDirAll(PathBuf::from("a")),
+            Open(PathBuf::from("a/filename"), true, true, false, false),
+            Rename(PathBuf::from("a"), PathBuf::from("b")),
+            Open(PathBuf::from("a/filename"), false, true, true, false),
+        ]);
+    }
+
+    #[test]
+    fn test_sim_file_system_6() {
+        use FileSystemOp::*;
+
+        check_sim_file_system(vec![
+            CreateDirAll(PathBuf::from("a")),
+            Open(PathBuf::from("a/filename"), true, true, true, false),
+            CreateDirAll(PathBuf::from("b")),
+            Rename(PathBuf::from("b"), PathBuf::from("a")),
+            Open(PathBuf::from("a/filename"), true, true, true, false),
+        ]);
+    }
+
+    #[test]
     fn restart() {
         let fs = SimFileSystem::new();
 
@@ -758,7 +800,7 @@ mod tests {
         fs.create_dir_all("./a/b/c".as_ref()).unwrap();
         let file = fs
             .open(
-                "./a/b/c".as_ref(),
+                "./a/b".as_ref(),
                 contracts::OpenOptions {
                     create: false,
                     write: false,
