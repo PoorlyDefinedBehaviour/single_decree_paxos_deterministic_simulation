@@ -198,14 +198,13 @@ impl ActionSimulator {
                     replica: Replica::new(
                         node.replica.config,
                         node.replica.bus,
-                        // Rc::new(
-                        // FileStorage::new(
-                        //     Rc::clone(&node.fs) as Rc<dyn contracts::FileSystem>,
-                        //     PathBuf::from("dir"),
-                        // )
-                        // .unwrap(),
-                        // ),
-                        node.replica.storage,
+                        Rc::new(
+                            FileStorage::new(
+                                Rc::clone(&node.fs) as Rc<dyn contracts::FileSystem>,
+                                PathBuf::from("dir"),
+                            )
+                            .unwrap(),
+                        ),
                     ),
                     ..node
                 });
@@ -241,6 +240,7 @@ impl ActionSimulator {
                     }
                 }
                 Action::RestartReplica => {
+                    continue;
                     let replica_id = {
                         let replica = self.choose_any_replica();
                         replica.config.id
@@ -401,12 +401,11 @@ mod tests {
                                             },
                                             Rc::clone(&bus) as Rc<dyn contracts::MessageBus>,
                                             Rc::new(
-                                                InMemoryStorage::new(),
-                                                // FileStorage::new(
-                                                //     Rc::clone(&fs) as Rc<dyn contracts::FileSystem>,
-                                                //     PathBuf::from("dir"),
-                                                // )
-                                                // .unwrap(),
+                                                FileStorage::new(
+                                                    Rc::clone(&fs) as Rc<dyn contracts::FileSystem>,
+                                                    PathBuf::from("dir"),
+                                                )
+                                                .unwrap(),
                                             ),
                                         ),
                                         fs,

@@ -1,14 +1,19 @@
 use core::cell::RefCell;
+
+use std::fs::File;
 use std::path::Path;
 use std::rc::Rc;
 use std::{collections::HashMap, path::PathBuf};
 
 use crate::contracts::{self, FileSystem};
 
+type FileDescriptor = u32;
+
 #[derive(Debug)]
 pub struct SimFileSystem {
-    pub cache: Rc<RefCell<HashMap<PathBuf, Rc<RefCell<FakeFile>>>>>,
-    pub disk: Rc<RefCell<HashMap<PathBuf, FakeFile>>>,
+    next_fd: RefCell<FileDescriptor>,
+    pub cache: Rc<RefCell<HashMap<FileDescriptor, Rc<RefCell<FakeFile>>>>>,
+    pub disk: Rc<RefCell<HashMap<FileDescriptor, FakeFile>>>,
 }
 
 impl Default for SimFileSystem {
@@ -23,8 +28,9 @@ pub enum FakeFileType {
     Data,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FakeFile {
+    pub fd: FileDescriptor,
     pub typ: FakeFileType,
     pub path: PathBuf,
     pub data: Vec<u8>,
@@ -32,17 +38,20 @@ pub struct FakeFile {
 
 impl SimFileSystem {
     pub fn new() -> Self {
-        SimFileSystem {
-            cache: Rc::new(RefCell::new(HashMap::from([(
-                PathBuf::from("tmp"),
-                Rc::new(RefCell::new(FakeFile {
-                    path: PathBuf::from("tmp"),
-                    typ: FakeFileType::Dir,
-                    data: Vec::new(),
-                })),
-            )]))),
+        let fs = SimFileSystem {
+            next_fd: RefCell::new(1),
+            cache: Rc::new(RefCell::new(HashMap::new())),
             disk: Rc::new(RefCell::new(HashMap::new())),
-        }
+        };
+        fs.create_dir_all(&PathBuf::from("/tmp")).unwrap();
+        fs
+    }
+
+    fn next_fd(&self) -> FileDescriptor {
+        let mut next_fd = self.next_fd.borrow_mut();
+        let fd = *next_fd;
+        *next_fd += 1;
+        fd
     }
 
     pub fn restart(&self) {
@@ -50,22 +59,25 @@ impl SimFileSystem {
 
         cache.clear();
 
-        for (path, file) in self.disk.borrow().iter() {
-            cache.insert(
-                path.to_owned(),
-                Rc::new(RefCell::new(FakeFile {
-                    typ: file.typ,
-                    path: file.path.to_owned(),
-                    data: file.data.clone(),
-                })),
-            );
+        for (fd, file) in self.disk.borrow().iter() {
+            assert_eq!(*fd, file.fd);
+            cache.insert(*fd, Rc::new(RefCell::new(file.clone())));
         }
     }
 }
 
-fn is_dir_empty(cache: &HashMap<PathBuf, Rc<RefCell<FakeFile>>>, dir: &Path) -> bool {
-    for path in cache.keys() {
-        if let Some(parent) = path.parent() {
+fn file_exists(cache: &HashMap<FileDescriptor, Rc<RefCell<FakeFile>>>, path: &Path) -> bool {
+    for (_, file) in cache {
+        if file.borrow().path == path {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_dir_empty(cache: &HashMap<FileDescriptor, Rc<RefCell<FakeFile>>>, dir: &Path) -> bool {
+    for (_fd, file) in cache.iter() {
+        if let Some(parent) = file.borrow().path.parent() {
             if parent == dir {
                 return false;
             }
@@ -75,8 +87,8 @@ fn is_dir_empty(cache: &HashMap<PathBuf, Rc<RefCell<FakeFile>>>, dir: &Path) -> 
 }
 
 struct SimFile {
-    cache: Rc<RefCell<HashMap<PathBuf, Rc<RefCell<FakeFile>>>>>,
-    disk: Rc<RefCell<HashMap<PathBuf, FakeFile>>>,
+    cache: Rc<RefCell<HashMap<FileDescriptor, Rc<RefCell<FakeFile>>>>>,
+    disk: Rc<RefCell<HashMap<FileDescriptor, FakeFile>>>,
     position: usize,
     open_options: contracts::OpenOptions,
     file: Rc<RefCell<FakeFile>>,
@@ -105,18 +117,24 @@ impl contracts::FileSystem for SimFileSystem {
                 }
             }
 
-            match cache.get(&current_path) {
+            match cache
+                .iter()
+                .find(|(_fd, file)| file.borrow().path == current_path)
+            {
                 None => {
+                    let fd = self.next_fd();
+
                     cache.insert(
-                        current_path.clone(),
+                        fd,
                         Rc::new(RefCell::new(FakeFile {
+                            fd,
                             typ: FakeFileType::Dir,
-                            path: path.to_owned(),
+                            path: current_path.to_owned(),
                             data: Vec::new(),
                         })),
                     );
                 }
-                Some(file) => {
+                Some((_fd, file)) => {
                     let file = file.borrow();
 
                     if file.typ != FakeFileType::Dir {
@@ -139,6 +157,8 @@ impl contracts::FileSystem for SimFileSystem {
         path: &std::path::Path,
         options: contracts::OpenOptions,
     ) -> std::io::Result<Box<dyn contracts::File>> {
+        let mut cache = self.cache.borrow_mut();
+
         match path.parent().map(PathBuf::from) {
             None => {
                 // ignore.
@@ -147,7 +167,7 @@ impl contracts::FileSystem for SimFileSystem {
                 // ignore.
             }
             Some(path) => {
-                if !self.cache.borrow().contains_key(&path) {
+                if !file_exists(&cache, &path) {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::NotFound,
                         "open: Cache doesn't contain parent path",
@@ -156,12 +176,12 @@ impl contracts::FileSystem for SimFileSystem {
             }
         }
 
-        let mut cache = self.cache.borrow_mut();
-
-        if options.create && !cache.contains_key(path) {
+        if options.create && !file_exists(&cache, path) {
+            let fd = self.next_fd();
             cache.insert(
-                path.to_owned(),
+                fd,
                 Rc::new(RefCell::new(FakeFile {
+                    fd,
                     typ: FakeFileType::Data,
                     path: path.to_owned(),
                     data: Vec::new(),
@@ -169,12 +189,15 @@ impl contracts::FileSystem for SimFileSystem {
             );
         }
 
-        match cache.get_mut(path) {
+        match cache
+            .iter_mut()
+            .find(|(_fd, file)| file.borrow().path == path)
+        {
             None => Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 "open: Cache doesn't contain path",
             )),
-            Some(file) => {
+            Some((fd, file)) => {
                 if file.borrow().typ == FakeFileType::Dir
                     && (options.create || options.write || options.truncate)
                 {
@@ -199,26 +222,29 @@ impl contracts::FileSystem for SimFileSystem {
     }
 
     fn rename(&self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
-        let mut cache = self.cache.borrow_mut();
+        let cache = self.cache.borrow_mut();
 
-        if from == to && cache.contains_key(from) {
-            return Ok(());
-        }
-
-        if let Some(parent) = to.parent() {
-            if !cache.contains_key(&PathBuf::from(parent)) {
+        if from == to {
+            if file_exists(&cache, from) {
+                return Ok(());
+            } else {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
-                    "No such file or directory",
+                    "File not found",
                 ));
             }
         }
 
-        if !cache.contains_key(from) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "No such file or directory",
-            ));
+        if let Some(parent) = to.parent() {
+            if !cache
+                .iter()
+                .any(|(_, file)| file.borrow().path == PathBuf::from(parent))
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "Parent not found",
+                ));
+            }
         }
 
         if !is_dir_empty(&cache, to) {
@@ -228,25 +254,45 @@ impl contracts::FileSystem for SimFileSystem {
             ));
         }
 
-        let file = cache.remove(from).unwrap();
+        {
+            let Some(mut file) = cache.iter().find_map(|(_fd, file)| {
+                let file = file.borrow_mut();
+                if file.path == from {
+                    Some(file)
+                } else {
+                    None
+                }
+            }) else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "File not found",
+                ));
+            };
 
-        file.borrow_mut().path = to.to_owned();
-        cache.insert(to.to_owned(), file);
+            file.path = to.to_owned();
+        }
 
-        let keys: Vec<PathBuf> = cache
-            .keys()
-            .filter(|key| key.parent() == Some(from))
+        let fds_in_dir: Vec<FileDescriptor> = cache
+            .iter()
+            .filter_map(|(fd, file)| {
+                let file = file.borrow();
+                if file.path.parent() == Some(from) {
+                    Some(fd)
+                } else {
+                    None
+                }
+            })
             .cloned()
             .collect();
 
-        for key in keys {
-            let new_key = key.to_str().unwrap().replace(
+        for fd in fds_in_dir {
+            let file = cache.get(&fd).unwrap();
+
+            let new_path = file.borrow().path.as_os_str().to_str().unwrap().replace(
                 from.as_os_str().to_str().unwrap(),
                 to.as_os_str().to_str().unwrap(),
             );
-            let file = cache.remove(&key).unwrap();
-            file.borrow_mut().path = PathBuf::from(&new_key);
-            cache.insert(PathBuf::from(&new_key), file);
+            file.borrow_mut().path = PathBuf::from(new_path);
         }
 
         Ok(())
@@ -255,8 +301,8 @@ impl contracts::FileSystem for SimFileSystem {
 
 impl SimFile {
     fn new(
-        cache: Rc<RefCell<HashMap<PathBuf, Rc<RefCell<FakeFile>>>>>,
-        disk: Rc<RefCell<HashMap<PathBuf, FakeFile>>>,
+        cache: Rc<RefCell<HashMap<FileDescriptor, Rc<RefCell<FakeFile>>>>>,
+        disk: Rc<RefCell<HashMap<FileDescriptor, FakeFile>>>,
         open_options: contracts::OpenOptions,
         file: Rc<RefCell<FakeFile>>,
     ) -> Self {
@@ -333,9 +379,11 @@ impl contracts::File for SimFile {
     }
 
     fn sync_all(&self) -> std::io::Result<()> {
+        let cache = self.cache.borrow();
+
         let file = self.file.borrow();
 
-        if !self.cache.borrow().contains_key(&file.path) {
+        if !file_exists(&cache, &file.path) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Uncategorized,
                 "Bad file descriptor",
@@ -344,14 +392,53 @@ impl contracts::File for SimFile {
 
         let mut disk = self.disk.borrow_mut();
 
-        disk.insert(
-            file.path.clone(),
-            FakeFile {
-                typ: file.typ,
-                path: file.path.clone(),
-                data: file.data.clone(),
-            },
-        );
+        if file.typ == FakeFileType::Dir {
+            let fds_in_dir: Vec<FileDescriptor> = cache
+                .iter()
+                .filter_map(|(fd, file_in_cache)| {
+                    let file_in_cache = file_in_cache.borrow();
+                    assert_eq!(*fd, file_in_cache.fd);
+                    if file_in_cache.path.parent() == Some(&file.path) {
+                        Some(fd)
+                    } else {
+                        None
+                    }
+                })
+                .cloned()
+                .collect();
+
+            for fd in fds_in_dir {
+                let file_in_cache = cache.get(&fd).unwrap().borrow();
+                assert_eq!(fd, file_in_cache.fd);
+                match disk.remove(&fd) {
+                    None => {
+                        disk.insert(
+                            fd,
+                            FakeFile {
+                                fd: file_in_cache.fd,
+                                typ: file_in_cache.typ,
+                                path: file_in_cache.path.clone(),
+                                data: Vec::new(),
+                            },
+                        );
+                    }
+                    Some(mut f) => {
+                        f.path = file_in_cache.path.clone();
+                        disk.insert(f.fd, f);
+                    }
+                }
+            }
+        } else {
+            disk.insert(
+                file.fd,
+                FakeFile {
+                    fd: file.fd,
+                    typ: file.typ,
+                    path: file.path.clone(),
+                    data: file.data.clone(),
+                },
+            );
+        }
 
         Ok(())
     }
@@ -574,6 +661,30 @@ mod tests {
     }
 
     #[test]
+    fn test_sim_file_system_2() {
+        use FileSystemOp::*;
+
+        check_sim_file_system(vec![
+            CreateDirAll(PathBuf::from("b")),
+            Rename(PathBuf::from("b"), PathBuf::from("a")),
+            Rename(PathBuf::from("b"), PathBuf::from("b")),
+        ]);
+    }
+
+    #[test]
+    fn test_sim_file_system_3() {
+        use FileSystemOp::*;
+
+        check_sim_file_system(vec![
+            CreateDirAll(PathBuf::from("a")),
+            CreateDirAll(PathBuf::from("b")),
+            Rename(PathBuf::from("a"), PathBuf::from("b")),
+            Rename(PathBuf::from("b"), PathBuf::from("a")),
+            Rename(PathBuf::from("b"), PathBuf::from("a")),
+        ]);
+    }
+
+    #[test]
     fn restart() {
         let fs = SimFileSystem::new();
 
@@ -658,6 +769,6 @@ mod tests {
             .unwrap();
         file.sync_all().unwrap();
         fs.restart();
-        assert!(fs.cache.borrow().contains_key(&PathBuf::from("./a/b/c")));
+        assert!(file_exists(&fs.cache.borrow(), &PathBuf::from("./a/b/c")));
     }
 }
