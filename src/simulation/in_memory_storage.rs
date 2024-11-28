@@ -1,5 +1,5 @@
 use crate::contracts;
-use std::cell::RefCell;
+use std::{cell::RefCell, rc::Rc};
 
 #[derive(Debug)]
 pub struct InMemoryStorage {

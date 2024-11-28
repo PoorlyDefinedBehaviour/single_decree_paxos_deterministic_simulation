@@ -9,7 +9,7 @@ use rand::{
 };
 
 use crate::{
-    contracts::{self, MessageBus},
+    contracts::{self, MessageBus, Storage},
     file_storage::FileStorage,
     Replica, ReplicaId,
 };
@@ -40,6 +40,13 @@ impl UnwindSafe for ActionSimulator {}
 pub struct Node {
     pub replica: Replica,
     pub fs: Rc<SimFileSystem>,
+}
+
+impl Node {
+    fn restart(&mut self) {
+        // Pretend the node restarted and the in the file system cache was lost.
+        self.fs.restart();
+    }
 }
 
 #[derive(Debug)]
@@ -191,20 +198,33 @@ impl ActionSimulator {
     fn restart_node(&mut self, replica_id: ReplicaId) {
         for i in 0..self.nodes.len() {
             if self.nodes[i].replica.config.id == replica_id {
-                let node = self.nodes.swap_remove(i);
-                // Pretend the node restarted and the in the file system cache was lost.
-                node.fs.restart();
+                let mut node = self.nodes.swap_remove(i);
+                let state = node.replica.storage.load();
+
+                // Pretend the node restarted.
+                node.restart();
+                let id = node.replica.config.id;
+
                 self.nodes.push(Node {
                     replica: Replica::new(
                         node.replica.config,
                         node.replica.bus,
-                        Rc::new(
-                            FileStorage::new(
+                        Rc::new({
+                            let s = FileStorage::new(
                                 Rc::clone(&node.fs) as Rc<dyn contracts::FileSystem>,
                                 PathBuf::from("dir"),
                             )
-                            .unwrap(),
-                        ),
+                            .unwrap();
+
+                            assert_eq!(
+                                state,
+                                s.load(),
+                                "replica: {} state_from_node_storage={:?} ",
+                                id,
+                                node.replica.storage.load()
+                            );
+                            s
+                        }),
                     ),
                     ..node
                 });
@@ -240,7 +260,6 @@ impl ActionSimulator {
                     }
                 }
                 Action::RestartReplica => {
-                    continue;
                     let replica_id = {
                         let replica = self.choose_any_replica();
                         replica.config.id
@@ -322,10 +341,7 @@ mod tests {
 
     use crate::{
         file_storage::FileStorage,
-        simulation::{
-            file_system::SimFileSystem, in_memory_storage::InMemoryStorage,
-            message_bus::SimMessageBus,
-        },
+        simulation::{file_system::SimFileSystem, message_bus::SimMessageBus},
         Config, Replica,
     };
 

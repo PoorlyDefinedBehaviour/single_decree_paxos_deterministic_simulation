@@ -105,6 +105,7 @@ impl contracts::Storage for FileStorage {
     fn store(&self, state: &contracts::DurableState) -> std::io::Result<()> {
         let temp_file_path = self.dir.join("paxos.state.temp");
         let final_file_path = self.dir.join("paxos.state");
+
         let mut file = create_or_truncate_file(self.fs.as_ref(), &temp_file_path)?;
         file.write_all(serde_json::to_string(state).unwrap().as_ref())?;
         file.sync_all()?;

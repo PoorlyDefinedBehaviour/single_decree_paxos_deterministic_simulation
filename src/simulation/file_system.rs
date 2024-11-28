@@ -1,6 +1,5 @@
 use core::cell::RefCell;
 
-use std::fs::File;
 use std::path::Path;
 use std::rc::Rc;
 use std::{collections::HashMap, path::PathBuf};
@@ -43,8 +42,12 @@ impl SimFileSystem {
             cache: Rc::new(RefCell::new(HashMap::new())),
             disk: Rc::new(RefCell::new(HashMap::new())),
         };
-        fs.create_dir_all(&PathBuf::from("/tmp")).unwrap();
+        fs.init();
         fs
+    }
+
+    fn init(&self) {
+        self.create_dir_all(&PathBuf::from("/tmp")).unwrap();
     }
 
     fn next_fd(&self) -> FileDescriptor {
@@ -55,12 +58,19 @@ impl SimFileSystem {
     }
 
     pub fn restart(&self) {
-        let mut cache = self.cache.borrow_mut();
+        {
+            let mut cache = self.cache.borrow_mut();
 
-        cache.clear();
+            cache.clear();
+        }
+
+        self.init();
+
+        let mut cache = self.cache.borrow_mut();
 
         for (fd, file) in self.disk.borrow().iter() {
             assert_eq!(*fd, file.fd);
+
             cache.insert(*fd, Rc::new(RefCell::new(file.clone())));
         }
     }
@@ -197,7 +207,7 @@ impl contracts::FileSystem for SimFileSystem {
                 std::io::ErrorKind::NotFound,
                 "open: Cache doesn't contain path",
             )),
-            Some((fd, file)) => {
+            Some((_fd, file)) => {
                 if file.borrow().typ == FakeFileType::Dir
                     && (options.create || options.write || options.truncate)
                 {
@@ -396,6 +406,50 @@ impl contracts::File for SimFile {
         let mut disk = self.disk.borrow_mut();
 
         if file.typ == FakeFileType::Dir {
+            // Flush parent directories.
+            let mut current_path: PathBuf = PathBuf::new();
+
+            for component in file.path.components() {
+                match component {
+                    std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                        current_path = current_path.join(std::path::Component::RootDir.as_os_str());
+                    }
+                    std::path::Component::ParentDir => {
+                        continue;
+                    }
+                    std::path::Component::CurDir => {
+                        current_path = current_path.join(".");
+                    }
+                    std::path::Component::Normal(dir) => {
+                        current_path = current_path.join(dir);
+                    }
+                };
+
+                if !disk.iter().any(|(fd, file)| file.path == current_path) {
+                    let file_in_cache = cache
+                        .iter()
+                        .find_map(|(_fd, file)| {
+                            let file = file.borrow();
+
+                            if file.path == current_path {
+                                Some(file)
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap();
+
+                    disk.insert(
+                        file_in_cache.fd,
+                        FakeFile {
+                            fd: file_in_cache.fd,
+                            typ: file_in_cache.typ,
+                            path: file_in_cache.path.clone(),
+                            data: Vec::new(),
+                        },
+                    );
+                }
+            }
             let fds_in_dir: Vec<FileDescriptor> = cache
                 .iter()
                 .filter_map(|(fd, file_in_cache)| {
@@ -432,6 +486,7 @@ impl contracts::File for SimFile {
                 }
             }
         } else {
+            disk.retain(|_fd, file| file.path != file.path);
             disk.insert(
                 file.fd,
                 FakeFile {
@@ -795,6 +850,55 @@ mod tests {
     }
 
     #[test]
+    fn test_sync_all_file() {
+        let fs = SimFileSystem::new();
+        fs.create_dir_all("./a".as_ref()).unwrap();
+
+        let mut file = fs
+            .open(
+                "./a/filename".as_ref(),
+                contracts::OpenOptions {
+                    create: true,
+                    write: true,
+                    read: true,
+                    truncate: false,
+                },
+            )
+            .unwrap();
+        file.write_all(b"hello world").unwrap();
+        file.sync_all().unwrap();
+
+        let dir = fs
+            .open(
+                "./a".as_ref(),
+                contracts::OpenOptions {
+                    create: false,
+                    write: false,
+                    read: true,
+                    truncate: false,
+                },
+            )
+            .unwrap();
+        dir.sync_all().unwrap();
+
+        fs.restart();
+        let mut file = fs
+            .open(
+                "./a/filename".as_ref(),
+                contracts::OpenOptions {
+                    create: true,
+                    write: true,
+                    read: true,
+                    truncate: false,
+                },
+            )
+            .unwrap();
+        let mut buffer = String::new();
+        file.read_to_string(&mut buffer).unwrap();
+        assert_eq!("hello world", buffer);
+    }
+
+    #[test]
     fn test_sync_all_dir() {
         let fs = SimFileSystem::new();
         fs.create_dir_all("./a/b/c".as_ref()).unwrap();
@@ -812,5 +916,48 @@ mod tests {
         file.sync_all().unwrap();
         fs.restart();
         assert!(file_exists(&fs.cache.borrow(), &PathBuf::from("./a/b/c")));
+    }
+
+    fn create_or_truncate_file(
+        fs: &dyn contracts::FileSystem,
+        path: &Path,
+    ) -> std::io::Result<Box<dyn contracts::File>> {
+        fs.open(
+            path,
+            contracts::OpenOptions {
+                create: true,
+                read: true,
+                write: true,
+                truncate: true,
+            },
+        )
+    }
+
+    #[test]
+    fn test_restart_and_sync() {
+        let fs = SimFileSystem::new();
+        let dir_path = PathBuf::from("dir");
+        fs.create_dir_all(&dir_path).unwrap();
+        let temp_file_path = dir_path.join("paxos.state.temp");
+        let final_file_path = dir_path.join("paxos.state");
+        let mut file: Box<dyn contracts::File> =
+            create_or_truncate_file(&fs, &temp_file_path).unwrap();
+        file.write_all(b"hello world").unwrap();
+        file.sync_all().unwrap();
+        fs.rename(&temp_file_path, &final_file_path).unwrap();
+        let dir_file = fs
+            .open(
+                &dir_path,
+                contracts::OpenOptions {
+                    create: false,
+                    read: true,
+                    write: false,
+                    truncate: false,
+                },
+            )
+            .unwrap();
+        dir_file.sync_all().unwrap();
+
+        fs.restart();
     }
 }
