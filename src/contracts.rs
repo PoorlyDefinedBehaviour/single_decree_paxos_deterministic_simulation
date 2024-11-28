@@ -1,4 +1,4 @@
-use std::{path::Path, rc::Rc};
+use std::path::Path;
 
 use crate::types::{
     AcceptInput, AcceptOutput, PrepareInput, PrepareOutput, ProposalNumber, ReplicaId,
