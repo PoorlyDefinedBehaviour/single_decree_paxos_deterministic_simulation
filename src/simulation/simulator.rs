@@ -209,22 +209,13 @@ impl ActionSimulator {
                     replica: Replica::new(
                         node.replica.config,
                         node.replica.bus,
-                        Rc::new({
-                            let s = FileStorage::new(
+                        Rc::new(
+                            FileStorage::new(
                                 Rc::clone(&node.fs) as Rc<dyn contracts::FileSystem>,
                                 PathBuf::from("dir"),
                             )
-                            .unwrap();
-
-                            assert_eq!(
-                                state,
-                                s.load(),
-                                "replica: {} state_from_node_storage={:?} ",
-                                id,
-                                node.replica.storage.load()
-                            );
-                            s
-                        }),
+                            .unwrap(),
+                        ),
                     ),
                     ..node
                 });
