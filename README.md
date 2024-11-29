@@ -1,5 +1,7 @@
 ## About
 
+See the [blog post](https://github.com/PoorlyDefinedBehaviour/poorlydefinedbehaviour.github.io/blob/main/content/posts/deterministic_simulation_testing/index.md).
+
 ```console
 running 1 test
 [BUS] Simulator -> Replica(1) QUEUED StartProposal(V(1, 0))
@@ -142,13 +144,3 @@ fn store(&self, state: &contracts::DurableState) -> std::io::Result<()> {
 }
 ```
 
-## TODO
-
-- [x] Activity log like P-Lang has.
-- [x] Drop messages
-- [x] Delay messages
-- [x] Reorder messages
-- [x] Duplicate messages
-- [x] Better action generation. Do not generate actions that don't make sense given the state of the system (e.g. Action::DeliverMessage when no messages were sent)
-- Inject IO (e.g. filesystem) errors
-- Remove .unwrap() calls
