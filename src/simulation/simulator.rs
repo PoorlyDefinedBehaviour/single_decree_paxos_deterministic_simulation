@@ -199,7 +199,6 @@ impl ActionSimulator {
         for i in 0..self.nodes.len() {
             if self.nodes[i].replica.config.id == replica_id {
                 let mut node = self.nodes.swap_remove(i);
-                let state = node.replica.storage.load();
 
                 // Pretend the node restarted.
                 node.restart();
