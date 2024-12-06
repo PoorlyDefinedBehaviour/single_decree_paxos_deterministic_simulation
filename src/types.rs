@@ -50,5 +50,5 @@ pub struct AcceptInput {
 pub struct AcceptOutput {
     pub from_replica_id: ReplicaId,
     pub request_id: RequestId,
-    pub min_proposal_number: ProposalNumber,
+    pub proposal_number: ProposalNumber,
 }

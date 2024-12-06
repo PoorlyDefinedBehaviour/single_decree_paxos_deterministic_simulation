@@ -27,6 +27,7 @@ impl contracts::Storage for InMemoryStorage {
             .clone()
             .unwrap_or(contracts::DurableState {
                 min_proposal_number: 0,
+                next_proposal_number: 0,
                 accepted_proposal_number: None,
                 accepted_value: None,
             })

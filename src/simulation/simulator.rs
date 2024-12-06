@@ -202,7 +202,6 @@ impl ActionSimulator {
 
                 // Pretend the node restarted.
                 node.restart();
-                let id = node.replica.config.id;
 
                 self.nodes.push(Node {
                     replica: Replica::new(

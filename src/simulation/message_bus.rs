@@ -147,19 +147,19 @@ impl PendingMessage {
             PendingMessage::AcceptResponse(to_replica_id, msg) => match event_type {
                 EventType::Queue => format!(
                     "[BUS] Replica({}) -> Replica({}) QUEUED AcceptResponse({}, {})",
-                    msg.from_replica_id, to_replica_id, msg.request_id, msg.min_proposal_number
+                    msg.from_replica_id, to_replica_id, msg.request_id, msg.proposal_number
                 ),
                 EventType::Receive => format!(
                     "[BUS] Replica({}) -> Replica({}) RECEIVED AcceptResponse({}, {})",
-                    msg.from_replica_id, to_replica_id, msg.request_id, msg.min_proposal_number,
+                    msg.from_replica_id, to_replica_id, msg.request_id, msg.proposal_number,
                 ),
                 EventType::Drop => format!(
                     "[SIMULATOR] DROP Replica({}) -> Replica({}) AcceptResponse({}, {})",
-                    msg.from_replica_id, to_replica_id, msg.request_id, msg.min_proposal_number,
+                    msg.from_replica_id, to_replica_id, msg.request_id, msg.proposal_number,
                 ),
                 EventType::Duplicate => format!(
                     "[SIMULATOR] DUPLICATE Replica({}) -> Replica({}) AcceptResponse({}, {})",
-                    msg.from_replica_id, to_replica_id, msg.request_id, msg.min_proposal_number,
+                    msg.from_replica_id, to_replica_id, msg.request_id, msg.proposal_number,
                 ),
             },
         }

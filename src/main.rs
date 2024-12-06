@@ -64,13 +64,14 @@ impl Replica {
     }
 
     fn next_proposal_number(&mut self) -> Result<u64> {
+        let proposal_number = self.state.next_proposal_number;
         let state = contracts::DurableState {
-            min_proposal_number: self.state.min_proposal_number + 1,
+            next_proposal_number: self.state.next_proposal_number + 1,
             ..self.state.clone()
         };
         self.storage.store(&state)?;
         self.state = state;
-        Ok(self.state.min_proposal_number)
+        Ok(proposal_number)
     }
 
     pub fn on_start_proposal(&mut self, value: String) {
@@ -125,6 +126,7 @@ impl Replica {
     pub fn on_accept(&mut self, input: AcceptInput) {
         if input.proposal_number >= self.state.min_proposal_number {
             let mut state = self.state.clone();
+            state.min_proposal_number = input.proposal_number;
             state.accepted_proposal_number = Some(input.proposal_number);
             state.accepted_value = Some(input.value);
             self.storage.store(&state).unwrap();
@@ -135,7 +137,7 @@ impl Replica {
                 AcceptOutput {
                     from_replica_id: self.config.id,
                     request_id: input.request_id,
-                    min_proposal_number: self.state.min_proposal_number,
+                    proposal_number: input.proposal_number,
                 },
             );
         }

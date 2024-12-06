@@ -7,6 +7,7 @@ use crate::types::{
 #[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
 pub struct DurableState {
     pub min_proposal_number: ProposalNumber,
+    pub next_proposal_number: ProposalNumber,
     pub accepted_proposal_number: Option<ProposalNumber>,
     pub accepted_value: Option<String>,
 }

@@ -4,8 +4,7 @@ use std::{
     rc::Rc,
 };
 
-use crate::types::{AcceptInput, AcceptOutput,  ReplicaId, RequestId};
-
+use crate::types::{AcceptInput, AcceptOutput, ReplicaId, RequestId};
 
 use super::activity_log::ActivityLog;
 
@@ -44,10 +43,15 @@ impl Oracle {
     }
 
     pub fn on_accept_sent(&mut self, _to_replica_id: ReplicaId, input: &AcceptInput) {
-        self.inflight_accept_requests.insert(
-            input.request_id,
-            InflightAcceptRequest::new(input.value.clone()),
-        );
+        if !self
+            .inflight_accept_requests
+            .contains_key(&input.request_id)
+        {
+            self.inflight_accept_requests.insert(
+                input.request_id,
+                InflightAcceptRequest::new(input.value.clone()),
+            );
+        }
     }
 
     pub fn on_proposal_accepted(&mut self, _to_replica_id: ReplicaId, output: &AcceptOutput) {
@@ -58,15 +62,16 @@ impl Oracle {
             }
 
             self.activity_log.borrow_mut().record(format!(
-                "[ORACLE] value accepted by majority of replicas: majority={} {} value={} replicas={:?}",
+                "[ORACLE] value accepted by majority of replicas: majority={} {} value={} replicas={:?} request_id={:?}",
                 self.majority,
                 output.request_id,
                 req.value.as_str(),
                 req.responses
                     .iter()
-                    .map(|response| response.from_replica_id)
+                    .map(|response| (response.from_replica_id, response.proposal_number))
                     .collect::<Vec<_>>(),
-                    
+                    &output.request_id
+
             ));
 
             if self.decided_value.is_none() {

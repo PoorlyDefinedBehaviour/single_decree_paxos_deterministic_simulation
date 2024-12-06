@@ -97,6 +97,7 @@ impl contracts::Storage for FileStorage {
             .clone()
             .unwrap_or(contracts::DurableState {
                 min_proposal_number: 0,
+                next_proposal_number: 0,
                 accepted_proposal_number: None,
                 accepted_value: None,
             })
@@ -179,7 +180,7 @@ mod tests {
     enum Op {
         New,
         Load,
-        Store(u64, Option<u64>, Option<String>),
+        Store(u64, u64, Option<u64>, Option<String>),
     }
 
     impl Arbitrary for Op {
@@ -188,6 +189,7 @@ mod tests {
                 0 => Op::New,
                 1 => Op::Load,
                 2 => Op::Store(
+                    u64::arbitrary(g),
                     u64::arbitrary(g),
                     Option::<u64>::arbitrary(g),
                     Option::<String>::arbitrary(g),
@@ -212,9 +214,10 @@ mod tests {
               Op::Load => {
                 assert_eq!(model.load(), storage.load());
               },
-              Op::Store(min_proposal_number, accepted_proposal_number, accepted_value) => {
+              Op::Store(next_proposal_number, min_proposal_number, accepted_proposal_number, accepted_value) => {
                 let state = contracts::DurableState{
                   min_proposal_number,
+                  next_proposal_number,
                   accepted_proposal_number,
                   accepted_value
                 };
